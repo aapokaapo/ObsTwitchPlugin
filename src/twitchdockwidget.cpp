@@ -141,34 +141,49 @@ void TwitchDockWidget::buildUi()
     auto *oauthHelpLabel = new QLabel(
         tr("Create a Twitch app in the Developer Console, add redirect URL %1, paste the Client ID and Client Secret here, then click Authorize in Browser.")
             .arg(oauthRedirectUrl()),
-        streamTab);
+        nullptr);
     oauthHelpLabel->setWordWrap(true);
 
     auto *refreshButton = new QPushButton(tr("Refresh OBS Twitch Settings"), streamTab);
     auto *developerConsoleButton = new QPushButton(tr("Open Twitch Developer Console"), streamTab);
     auto *oauthButton = new QPushButton(tr("Authorize in Browser"), streamTab);
     auto *updateButton = new QPushButton(tr("Update Channel Info"), streamTab);
+    toggleAuthFieldsButton_ = new QPushButton(tr("Authorization Settings"), streamTab);
+    authFieldsContainer_ = new QWidget(this, Qt::Dialog);
+    authFieldsContainer_->setWindowTitle(tr("Twitch Authorization"));
+    authFieldsContainer_->setAttribute(Qt::WA_DeleteOnClose, false);
+    authFieldsContainer_->hide();
+    auto *authLayout = new QGridLayout(authFieldsContainer_);
+    authLayout->setContentsMargins(0, 0, 0, 0);
+    authLayout->addWidget(oauthHelpLabel, 0, 0, 1, 2);
+    authLayout->addWidget(new QLabel(tr("Twitch Client ID"), authFieldsContainer_), 1, 0);
+    authLayout->addWidget(clientIdEdit_, 1, 1);
+    authLayout->addWidget(new QLabel(tr("Twitch Client Secret"), authFieldsContainer_), 2, 0);
+    authLayout->addWidget(clientSecretEdit_, 2, 1);
+    authLayout->addWidget(new QLabel(tr("OAuth Token"), authFieldsContainer_), 3, 0);
+    authLayout->addWidget(tokenEdit_, 3, 1);
+    authLayout->addWidget(developerConsoleButton, 4, 0, 1, 2);
+    authLayout->addWidget(oauthButton, 5, 0, 1, 2);
 
-    streamLayout->addWidget(oauthHelpLabel, 0, 0, 1, 2);
-    streamLayout->addWidget(new QLabel(tr("Stream Title"), streamTab), 1, 0);
-    streamLayout->addWidget(titleEdit_, 1, 1);
-    streamLayout->addWidget(new QLabel(tr("Category Game ID"), streamTab), 2, 0);
-    streamLayout->addWidget(gameIdEdit_, 2, 1);
-    streamLayout->addWidget(new QLabel(tr("Twitch Client ID"), streamTab), 3, 0);
-    streamLayout->addWidget(clientIdEdit_, 3, 1);
-    streamLayout->addWidget(new QLabel(tr("Twitch Client Secret"), streamTab), 4, 0);
-    streamLayout->addWidget(clientSecretEdit_, 4, 1);
-    streamLayout->addWidget(new QLabel(tr("OAuth Token"), streamTab), 5, 0);
-    streamLayout->addWidget(tokenEdit_, 5, 1);
-    streamLayout->addWidget(refreshButton, 6, 0, 1, 2);
-    streamLayout->addWidget(developerConsoleButton, 7, 0, 1, 2);
-    streamLayout->addWidget(oauthButton, 8, 0, 1, 2);
-    streamLayout->addWidget(updateButton, 9, 0, 1, 2);
+    streamLayout->addWidget(new QLabel(tr("Stream Title"), streamTab), 0, 0);
+    streamLayout->addWidget(titleEdit_, 0, 1);
+    streamLayout->addWidget(new QLabel(tr("Category Game ID"), streamTab), 1, 0);
+    streamLayout->addWidget(gameIdEdit_, 1, 1);
+    streamLayout->addWidget(updateButton, 2, 0, 1, 2);
+    streamLayout->addWidget(refreshButton, 3, 0, 1, 2);
+    streamLayout->addWidget(toggleAuthFieldsButton_, 4, 0, 1, 2);
 
     connect(refreshButton, &QPushButton::clicked, this, &TwitchDockWidget::refreshObsServiceData);
     connect(developerConsoleButton, &QPushButton::clicked, this, &TwitchDockWidget::openTwitchDeveloperConsole);
     connect(oauthButton, &QPushButton::clicked, this, &TwitchDockWidget::ensureOAuthToken);
     connect(updateButton, &QPushButton::clicked, this, &TwitchDockWidget::updateChannelInfo);
+    connect(toggleAuthFieldsButton_, &QPushButton::clicked, this, [this]() {
+        if (authFieldsContainer_) {
+            authFieldsContainer_->show();
+            authFieldsContainer_->raise();
+            authFieldsContainer_->activateWindow();
+        }
+    });
 
     tabs_->addTab(streamTab, tr("Stream Info"));
 
@@ -228,7 +243,6 @@ void TwitchDockWidget::refreshObsServiceData()
     if (!credentials.clientSecret.isEmpty()) {
         clientSecretEdit_->setText(credentials.clientSecret);
     }
-
     appendChatSystemMessage(
         credentials.streamKey.isEmpty() ? tr("Stream key not found in current OBS service/profile settings.")
                                         : tr("Stream key found in OBS settings."));
@@ -456,6 +470,9 @@ void TwitchDockWidget::exchangeOAuthCodeForToken(const QString &authorizationCod
         tokenEdit_->setText(token);
         persistOAuthToken(token);
         appendChatSystemMessage(tr("OAuth token exchange succeeded and token was cached."));
+        if (authFieldsContainer_) {
+            authFieldsContainer_->hide();
+        }
         fetchCurrentChannelInfo();
     });
 }

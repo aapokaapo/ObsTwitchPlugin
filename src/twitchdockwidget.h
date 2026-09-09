@@ -5,6 +5,7 @@
 #include <QLineEdit>
 #include <QListWidget>
 #include <QNetworkAccessManager>
+#include <QPushButton>
 #include <QTcpServer>
 #include <QTcpSocket>
 #include <QTabWidget>
@@ -75,6 +76,8 @@ private:
     QLineEdit *clientIdEdit_ = nullptr;
     QLineEdit *clientSecretEdit_ = nullptr;
     QLineEdit *tokenEdit_ = nullptr;
+    QWidget *authFieldsContainer_ = nullptr;
+    QPushButton *toggleAuthFieldsButton_ = nullptr;
 
     QListWidget *friendLinks_ = nullptr;
     QLineEdit *friendLinkInput_ = nullptr;
