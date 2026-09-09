@@ -45,6 +45,7 @@ constexpr auto kChatChannelSettingsKey = "chat_channel";
 constexpr auto kClientIdSettingsKey = "twitch_client_id";
 constexpr quint16 kOAuthRedirectPort = 38471;
 constexpr auto kDefaultChatColor = "#bf94ff";
+constexpr int kCategorySuggestionLimit = 20;
 
 QString oauthRedirectUrl()
 {
@@ -113,6 +114,12 @@ TwitchDockWidget::TwitchDockWidget(QWidget *parent)
 
     connect(oauthServer_, &QTcpServer::newConnection, this, &TwitchDockWidget::onOAuthServerConnection);
     connect(chatSocket_, &QTcpSocket::readyRead, this, &TwitchDockWidget::onChatSocketReadyRead);
+    categorySuggestTimer_ = new QTimer(this);
+    categorySuggestTimer_->setSingleShot(true);
+    categorySuggestTimer_->setInterval(250);
+    connect(categorySuggestTimer_, &QTimer::timeout, this, [this]() {
+        fetchCategorySuggestions(gameIdEdit_->text().trimmed());
+    });
 
     loadPersistedUiState();
     QTimer::singleShot(0, this, &TwitchDockWidget::refreshObsServiceData);
@@ -165,6 +172,24 @@ void TwitchDockWidget::buildUi()
     auto *streamLayout = new QGridLayout(streamTab);
     titleEdit_ = new QLineEdit(streamTab);
     gameIdEdit_ = new QLineEdit(streamTab);
+    gameIdEdit_->setPlaceholderText(tr("Category name (e.g. Just Chatting)"));
+    gameCategorySuggestionsModel_ = new QStringListModel(this);
+    gameCategoryCompleter_ = new QCompleter(gameCategorySuggestionsModel_, gameIdEdit_);
+    gameCategoryCompleter_->setCaseSensitivity(Qt::CaseInsensitive);
+    gameCategoryCompleter_->setFilterMode(Qt::MatchContains);
+    gameCategoryCompleter_->setCompletionMode(QCompleter::PopupCompletion);
+    gameIdEdit_->setCompleter(gameCategoryCompleter_);
+    connect(gameIdEdit_, &QLineEdit::textEdited, this, [this](const QString &text) {
+        const QString query = text.trimmed();
+        if (query.isEmpty()) {
+            if (categorySuggestReply_) {
+                categorySuggestReply_->abort();
+            }
+            gameCategorySuggestionsModel_->setStringList({});
+            return;
+        }
+        categorySuggestTimer_->start();
+    });
     clientIdEdit_ = new QLineEdit(streamTab);
     clientIdEdit_->setEchoMode(QLineEdit::Password);
     connect(clientIdEdit_, &QLineEdit::editingFinished, this, [this]() {
@@ -203,7 +228,7 @@ void TwitchDockWidget::buildUi()
 
     streamLayout->addWidget(new QLabel(tr("Stream Title"), streamTab), 0, 0);
     streamLayout->addWidget(titleEdit_, 0, 1);
-    streamLayout->addWidget(new QLabel(tr("Category Game ID"), streamTab), 1, 0);
+    streamLayout->addWidget(new QLabel(tr("Category"), streamTab), 1, 0);
     streamLayout->addWidget(gameIdEdit_, 1, 1);
     streamLayout->addWidget(updateButton, 2, 0, 1, 2);
     streamLayout->addWidget(refreshButton, 3, 0, 1, 2);
@@ -674,7 +699,7 @@ void TwitchDockWidget::updateChannelInfo()
     const QString token = tokenEdit_->text().trimmed();
     const QString clientId = clientIdEdit_->text().trimmed();
     const QString title = titleEdit_->text().trimmed();
-    const QString gameId = gameIdEdit_->text().trimmed();
+    const QString categoryName = gameIdEdit_->text().trimmed();
 
     if (!clientId.isEmpty()) {
         persistClientId(clientId);
@@ -685,41 +710,48 @@ void TwitchDockWidget::updateChannelInfo()
         return;
     }
 
-    resolveIdentity(token, [this, token, clientId, title, gameId](bool ok) {
+    resolveIdentity(token, [this, token, clientId, title, categoryName](bool ok) {
         if (!ok) {
             return;
         }
 
-        QUrl url(QStringLiteral("https://api.twitch.tv/helix/channels"));
-        QUrlQuery query;
-        query.addQueryItem(QStringLiteral("broadcaster_id"), broadcasterId_);
-        url.setQuery(query);
-
-        QNetworkRequest request(url);
-        request.setHeader(QNetworkRequest::ContentTypeHeader, QStringLiteral("application/json"));
-        request.setRawHeader("Authorization", QByteArray("Bearer ") + token.toUtf8());
-        request.setRawHeader("Client-Id", clientId.toUtf8());
-
-        QJsonObject body;
-        if (!title.isEmpty()) {
-            body.insert(QStringLiteral("title"), title);
-        }
-        if (!gameId.isEmpty()) {
-            body.insert(QStringLiteral("game_id"), gameId);
-        }
-
-        QNetworkReply *reply = networkManager_->sendCustomRequest(
-            request, QByteArrayLiteral("PATCH"), QJsonDocument(body).toJson(QJsonDocument::Compact));
-        connect(reply, &QNetworkReply::finished, this, [this, reply]() {
-            const QNetworkReply::NetworkError error = reply->error();
-            const QString errorString = reply->errorString();
-            reply->deleteLater();
-
-            if (error == QNetworkReply::NoError) {
-                appendChatSystemMessage(tr("Twitch Helix channel update succeeded."));
-            } else {
-                appendChatSystemMessage(tr("Twitch Helix channel update failed: %1").arg(errorString));
+        resolveCategoryId(token, clientId, categoryName, [this, token, clientId, title](const QString &resolvedGameId) {
+            if (resolvedGameId.isNull()) {
+                appendChatSystemMessage(tr("Category not found. Choose a category suggestion or use an exact category name."));
+                return;
             }
+
+            QUrl url(QStringLiteral("https://api.twitch.tv/helix/channels"));
+            QUrlQuery query;
+            query.addQueryItem(QStringLiteral("broadcaster_id"), broadcasterId_);
+            url.setQuery(query);
+
+            QNetworkRequest request(url);
+            request.setHeader(QNetworkRequest::ContentTypeHeader, QStringLiteral("application/json"));
+            request.setRawHeader("Authorization", QByteArray("Bearer ") + token.toUtf8());
+            request.setRawHeader("Client-Id", clientId.toUtf8());
+
+            QJsonObject body;
+            if (!title.isEmpty()) {
+                body.insert(QStringLiteral("title"), title);
+            }
+            if (!resolvedGameId.isEmpty()) {
+                body.insert(QStringLiteral("game_id"), resolvedGameId);
+            }
+
+            QNetworkReply *reply = networkManager_->sendCustomRequest(
+                request, QByteArrayLiteral("PATCH"), QJsonDocument(body).toJson(QJsonDocument::Compact));
+            connect(reply, &QNetworkReply::finished, this, [this, reply]() {
+                const QNetworkReply::NetworkError error = reply->error();
+                const QString errorString = reply->errorString();
+                reply->deleteLater();
+
+                if (error == QNetworkReply::NoError) {
+                    appendChatSystemMessage(tr("Twitch Helix channel update succeeded."));
+                } else {
+                    appendChatSystemMessage(tr("Twitch Helix channel update failed: %1").arg(errorString));
+                }
+            });
         });
     });
 }
@@ -1058,11 +1090,110 @@ void TwitchDockWidget::fetchCurrentChannelInfo()
 
             const QJsonObject channel = data.first().toObject();
             titleEdit_->setText(channel.value(QStringLiteral("title")).toString().trimmed());
-            gameIdEdit_->setText(channel.value(QStringLiteral("game_id")).toString().trimmed());
+            gameIdEdit_->setText(channel.value(QStringLiteral("game_name")).toString().trimmed());
             const QString gameName = channel.value(QStringLiteral("game_name")).toString().trimmed();
             appendChatSystemMessage(
                 tr("Loaded current stream info from Twitch (title and game%1).")
                     .arg(gameName.isEmpty() ? QString() : QStringLiteral(": %1").arg(gameName)));
         });
+    });
+}
+
+void TwitchDockWidget::fetchCategorySuggestions(const QString &query)
+{
+    const QString searchQuery = query.trimmed();
+    const QString token = tokenEdit_->text().trimmed();
+    const QString clientId = clientIdEdit_->text().trimmed();
+    if (searchQuery.isEmpty() || token.isEmpty() || clientId.isEmpty()) {
+        gameCategorySuggestionsModel_->setStringList({});
+        return;
+    }
+
+    if (categorySuggestReply_) {
+        categorySuggestReply_->abort();
+        categorySuggestReply_ = nullptr;
+    }
+
+    QUrl url(QStringLiteral("https://api.twitch.tv/helix/search/categories"));
+    QUrlQuery urlQuery;
+    urlQuery.addQueryItem(QStringLiteral("query"), searchQuery);
+    urlQuery.addQueryItem(QStringLiteral("first"), QString::number(kCategorySuggestionLimit));
+    url.setQuery(urlQuery);
+
+    QNetworkRequest request(url);
+    request.setRawHeader("Authorization", QByteArray("Bearer ") + token.toUtf8());
+    request.setRawHeader("Client-Id", clientId.toUtf8());
+
+    QNetworkReply *reply = networkManager_->get(request);
+    categorySuggestReply_ = reply;
+    connect(reply, &QNetworkReply::finished, this, [this, reply, expectedQuery = searchQuery]() {
+        if (reply == categorySuggestReply_) {
+            categorySuggestReply_ = nullptr;
+        }
+
+        const QByteArray payloadBytes = reply->readAll();
+        const QNetworkReply::NetworkError error = reply->error();
+        reply->deleteLater();
+
+        if (error != QNetworkReply::NoError || expectedQuery != gameIdEdit_->text().trimmed()) {
+            return;
+        }
+
+        const QJsonObject payload = QJsonDocument::fromJson(payloadBytes).object();
+        const QJsonArray data = payload.value(QStringLiteral("data")).toArray();
+        QStringList categories;
+        categories.reserve(data.size());
+        for (const QJsonValue &entry : data) {
+            const QString name = entry.toObject().value(QStringLiteral("name")).toString().trimmed();
+            if (!name.isEmpty() && !categories.contains(name)) {
+                categories.append(name);
+            }
+        }
+        gameCategorySuggestionsModel_->setStringList(categories);
+    });
+}
+
+void TwitchDockWidget::resolveCategoryId(const QString &token,
+                                         const QString &clientId,
+                                         const QString &categoryName,
+                                         std::function<void(const QString &)> continuation)
+{
+    const QString trimmedName = categoryName.trimmed();
+    if (trimmedName.isEmpty()) {
+        continuation(QStringLiteral(""));
+        return;
+    }
+
+    QUrl url(QStringLiteral("https://api.twitch.tv/helix/search/categories"));
+    QUrlQuery query;
+    query.addQueryItem(QStringLiteral("query"), trimmedName);
+    query.addQueryItem(QStringLiteral("first"), QStringLiteral("25"));
+    url.setQuery(query);
+
+    QNetworkRequest request(url);
+    request.setRawHeader("Authorization", QByteArray("Bearer ") + token.toUtf8());
+    request.setRawHeader("Client-Id", clientId.toUtf8());
+
+    QNetworkReply *reply = networkManager_->get(request);
+    connect(reply, &QNetworkReply::finished, this, [reply, trimmedName, continuation = std::move(continuation)]() mutable {
+        const QByteArray payloadBytes = reply->readAll();
+        const QNetworkReply::NetworkError error = reply->error();
+        reply->deleteLater();
+
+        if (error != QNetworkReply::NoError) {
+            continuation(QString());
+            return;
+        }
+
+        const QJsonObject payload = QJsonDocument::fromJson(payloadBytes).object();
+        const QJsonArray data = payload.value(QStringLiteral("data")).toArray();
+        for (const QJsonValue &entry : data) {
+            const QJsonObject category = entry.toObject();
+            if (category.value(QStringLiteral("name")).toString().trimmed().compare(trimmedName, Qt::CaseInsensitive) == 0) {
+                continuation(category.value(QStringLiteral("id")).toString().trimmed());
+                return;
+            }
+        }
+        continuation(QString());
     });
 }

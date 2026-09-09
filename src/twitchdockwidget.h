@@ -8,12 +8,16 @@
 #include <QList>
 #include <QListWidget>
 #include <QNetworkAccessManager>
+#include <QNetworkReply>
 #include <QPushButton>
+#include <QCompleter>
 #include <QSet>
+#include <QStringListModel>
 #include <QTcpServer>
 #include <QTcpSocket>
 #include <QTabWidget>
 #include <QTextEdit>
+#include <QTimer>
 #include <QWidget>
 
 class TwitchDockWidget final : public QWidget {
@@ -81,6 +85,11 @@ private:
     void persistClientId(const QString &clientId);
     QString loadCachedClientId() const;
     void fetchCurrentChannelInfo();
+    void fetchCategorySuggestions(const QString &query);
+    void resolveCategoryId(const QString &token,
+                           const QString &clientId,
+                           const QString &categoryName,
+                           std::function<void(const QString &)> continuation);
 
     TwitchCredentials extractCredentialsFromObs() const;
     TwitchCredentials extractCredentialsFromObsProfileIni() const;
@@ -102,6 +111,8 @@ private:
 
     QLineEdit *titleEdit_ = nullptr;
     QLineEdit *gameIdEdit_ = nullptr;
+    QCompleter *gameCategoryCompleter_ = nullptr;
+    QStringListModel *gameCategorySuggestionsModel_ = nullptr;
     QLineEdit *clientIdEdit_ = nullptr;
     QLineEdit *clientSecretEdit_ = nullptr;
     QLineEdit *tokenEdit_ = nullptr;
@@ -114,6 +125,8 @@ private:
     QTcpServer *oauthServer_ = nullptr;
     QTcpSocket *chatSocket_ = nullptr;
     QNetworkAccessManager *networkManager_ = nullptr;
+    QTimer *categorySuggestTimer_ = nullptr;
+    QNetworkReply *categorySuggestReply_ = nullptr;
 
     QString broadcasterId_;
     QString twitchLogin_;
