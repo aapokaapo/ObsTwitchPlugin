@@ -3,10 +3,10 @@
 #include <QDockWidget>
 
 extern "C" {
-#if __has_include(<obs-frontend-api.h>)
-#include <obs-frontend-api.h>
-#else
+#if __has_include(<obs/obs-frontend-api.h>)
 #include <obs/obs-frontend-api.h>
+#else
+#include <obs-frontend-api.h>
 #endif
 #include <obs-module.h>
 }
