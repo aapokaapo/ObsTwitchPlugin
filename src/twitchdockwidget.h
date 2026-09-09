@@ -1,5 +1,7 @@
 #pragma once
 
+#include <functional>
+
 #include <QLineEdit>
 #include <QListWidget>
 #include <QNetworkAccessManager>
@@ -14,6 +16,7 @@ class TwitchDockWidget final : public QWidget {
 
 public:
     explicit TwitchDockWidget(QWidget *parent = nullptr);
+    ~TwitchDockWidget() override;
 
 private slots:
     void refreshObsServiceData();
@@ -48,7 +51,7 @@ private:
     void persistOAuthToken(const QString &token);
     QString loadCachedOAuthToken() const;
 
-    bool resolveIdentity(const QString &token);
+    void resolveIdentity(const QString &token, std::function<void(bool)> continuation);
     QByteArray buildIrcPass(const QString &oauthToken) const;
 
     QTabWidget *tabs_ = nullptr;
@@ -71,4 +74,5 @@ private:
 
     QString broadcasterId_;
     QString twitchLogin_;
+    QString validatedToken_;
 };
