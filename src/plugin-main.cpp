@@ -29,8 +29,8 @@ static QDockWidget *g_obsDock = nullptr;
 bool obs_module_load(void)
 {
     // Create a standard Qt dock and register it in OBS frontend UI.
-    g_obsDock = new QDockWidget(QStringLiteral(kDockTitle));
-    g_obsDock->setObjectName(QStringLiteral(kDockId));
+    g_obsDock = new QDockWidget(QString::fromLatin1(kDockTitle));
+    g_obsDock->setObjectName(QString::fromLatin1(kDockId));
     g_obsDock->setWidget(new TwitchDockWidget(g_obsDock));
 
     if (!obs_frontend_add_custom_qdock(kDockId, g_obsDock)) {
