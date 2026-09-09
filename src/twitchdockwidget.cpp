@@ -967,10 +967,11 @@ void TwitchDockWidget::renderChatMessage(const PendingChatMessage &message)
     cursor.insertHtml(QStringLiteral(
                           "<table style='border-collapse:collapse; margin:0;'>"
                           "<tr>"
-                          "<td rowspan='2' style='color:#8f8fa3; padding:0 10px 0 0; vertical-align:top;'>%1</td>"
+                          "<td style='color:#8f8fa3; padding:0 10px 0 0; vertical-align:top;'>%1</td>"
                           "<td style='color:%2; font-weight:600; padding:0;'>%3</td>"
                           "</tr>"
                           "<tr>"
+                          "<td style='padding:0 10px 0 0;'>&nbsp;</td>"
                           "<td style='padding:0;'>")
                           .arg(message.timestamp.toHtmlEscaped(), message.color, message.username.toHtmlEscaped()));
 
