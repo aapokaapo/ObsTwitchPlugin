@@ -40,6 +40,7 @@ constexpr auto kTokenSettingsKey = "twitch_oauth_token";
 constexpr auto kChatChannelSettingsKey = "chat_channel";
 constexpr auto kClientIdSettingsKey = "twitch_client_id";
 constexpr quint16 kOAuthRedirectPort = 38471;
+constexpr auto kEmojiFontStack = "Inter, Segoe UI, Segoe UI Emoji, Apple Color Emoji, Noto Color Emoji, sans-serif";
 
 QString oauthRedirectUrl()
 {
@@ -108,7 +109,9 @@ void TwitchDockWidget::buildUi()
     chatText_ = new QTextEdit(chatTab);
     chatText_->setReadOnly(true);
     chatText_->document()->setMaximumBlockCount(2000);
-    chatText_->setStyleSheet("QTextEdit { background-color: #0e0e10; color: #efeff1; border: 1px solid #2f3545; font-family: Inter, Segoe UI, sans-serif; font-size: 13px; }");
+    chatText_->setStyleSheet(
+        QStringLiteral("QTextEdit { background-color: #0e0e10; color: #efeff1; border: 1px solid #2f3545; font-family: %1; font-size: 13px; }")
+            .arg(QString::fromLatin1(kEmojiFontStack)));
     chatText_->setHtml(QStringLiteral("<span style='color:#adadb8;'>Twitch chat panel ready. Provide OAuth token, then join channel via IRC.</span>"));
 
     auto *chatRow = new QHBoxLayout();
@@ -131,6 +134,7 @@ void TwitchDockWidget::buildUi()
     auto *streamTab = new QWidget(this);
     auto *streamLayout = new QGridLayout(streamTab);
     titleEdit_ = new QLineEdit(streamTab);
+    titleEdit_->setStyleSheet(QStringLiteral("QLineEdit { font-family: %1; }").arg(QString::fromLatin1(kEmojiFontStack)));
     gameIdEdit_ = new QLineEdit(streamTab);
     clientIdEdit_ = new QLineEdit(streamTab);
     clientIdEdit_->setEchoMode(QLineEdit::Password);
