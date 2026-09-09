@@ -2,10 +2,14 @@
 
 #include <functional>
 
+#include <QHash>
+#include <QImage>
 #include <QLineEdit>
+#include <QList>
 #include <QListWidget>
 #include <QNetworkAccessManager>
 #include <QPushButton>
+#include <QSet>
 #include <QTcpServer>
 #include <QTcpSocket>
 #include <QTabWidget>
@@ -42,10 +46,35 @@ private:
         QString clientSecret;
     };
 
+    struct ChatEmoteOccurrence {
+        QString id;
+        int start = 0;
+        int end = -1;
+    };
+
+    struct PendingChatMessage {
+        QString timestamp;
+        QString username;
+        QString color;
+        QString message;
+        QList<ChatEmoteOccurrence> emotes;
+        QSet<QString> requiredEmoteIds;
+    };
+
     void buildUi();
     void loadPersistedUiState();
     void appendChatSystemMessage(const QString &message);
     void appendFormattedChatLine(const QByteArray &ircLine);
+    QList<ChatEmoteOccurrence> parseIrcEmotes(const QString &emotesTag) const;
+    void enqueueChatMessage(const QString &timestamp,
+                            const QString &username,
+                            const QString &color,
+                            const QString &message,
+                            const QList<ChatEmoteOccurrence> &emotes);
+    void flushPendingChatMessages();
+    void renderChatMessage(const PendingChatMessage &message);
+    void requestEmoteImage(const QString &emoteId);
+    bool isEmoteAvailable(const QString &emoteId) const;
     QString sanitizeChannelLogin(const QString &value) const;
     void persistChatChannel(const QString &channel);
     QString loadCachedChatChannel() const;
@@ -89,4 +118,8 @@ private:
     QString broadcasterId_;
     QString twitchLogin_;
     QString validatedToken_;
+    QHash<QString, QImage> emoteImages_;
+    QSet<QString> pendingEmoteIds_;
+    QSet<QString> unavailableEmoteIds_;
+    QList<PendingChatMessage> pendingChatMessages_;
 };

@@ -18,12 +18,16 @@
 #include <QRegularExpression>
 #include <QSettings>
 #include <QStandardPaths>
+#include <QTextCursor>
 #include <QTextDocument>
+#include <QTextImageFormat>
 #include <QTimer>
 #include <QTime>
 #include <QUrl>
 #include <QUrlQuery>
 #include <QVBoxLayout>
+
+#include <algorithm>
 
 extern "C" {
 #if __has_include(<obs/obs-frontend-api.h>)
@@ -40,6 +44,7 @@ constexpr auto kTokenSettingsKey = "twitch_oauth_token";
 constexpr auto kChatChannelSettingsKey = "chat_channel";
 constexpr auto kClientIdSettingsKey = "twitch_client_id";
 constexpr quint16 kOAuthRedirectPort = 38471;
+constexpr auto kDefaultChatColor = "#bf94ff";
 
 QString oauthRedirectUrl()
 {
@@ -69,6 +74,23 @@ QString ircTagValue(const QString &tags, const QString &key)
     }
     return {};
 }
+
+QString sanitizeChatColor(const QString &colorValue)
+{
+    static const QRegularExpression hexColorPattern(QStringLiteral("^#[0-9A-Fa-f]{6}$"));
+    return hexColorPattern.match(colorValue).hasMatch() ? colorValue : QStringLiteral(kDefaultChatColor);
+}
+
+QUrl twitchEmoteUrl(const QString &emoteId)
+{
+    return QUrl(QStringLiteral("https://static-cdn.jtvnw.net/emoticons/v2/%1/default/dark/2.0").arg(emoteId));
+}
+
+QUrl emoteResourceUrl(const QString &emoteId)
+{
+    return QUrl(QStringLiteral("twitch-emote://%1").arg(emoteId));
+}
+
 }
 
 TwitchDockWidget::TwitchDockWidget(QWidget *parent)
@@ -743,14 +765,11 @@ void TwitchDockWidget::appendFormattedChatLine(const QByteArray &ircLine)
     const QRegularExpressionMatch messageMatch = messagePattern.match(line);
     if (messageMatch.hasMatch()) {
         const QString tags = messageMatch.captured(1);
-        const QString message = messageMatch.captured(2).toHtmlEscaped();
+        const QString message = messageMatch.captured(2);
         const QString displayName = ircTagValue(tags, QStringLiteral("display-name"));
-        const QString username = displayName.isEmpty() ? QStringLiteral("user") : displayName.toHtmlEscaped();
-        const QString colorValue = ircTagValue(tags, QStringLiteral("color"));
-        const QString color = colorValue.isEmpty() ? QStringLiteral("#bf94ff") : colorValue;
-        chatText_->append(QStringLiteral("<span style='color:#8f8fa3;'>%1</span> <span style='color:%2; font-weight:600;'>%3</span>"
-                                         "<span style='color:#efeff1;'>:</span> <span style='color:#efeff1;'>%4</span>")
-                              .arg(timestamp, color, username, message));
+        const QString username = displayName.isEmpty() ? QStringLiteral("user") : displayName;
+        const QString color = sanitizeChatColor(ircTagValue(tags, QStringLiteral("color")));
+        enqueueChatMessage(timestamp, username, color, message, parseIrcEmotes(ircTagValue(tags, QStringLiteral("emotes"))));
         return;
     }
 
@@ -764,6 +783,167 @@ void TwitchDockWidget::appendFormattedChatLine(const QByteArray &ircLine)
 
     chatText_->append(QStringLiteral("<span style='color:#8f8fa3;'>%1</span> <span style='color:#adadb8;'>%2</span>")
                           .arg(timestamp, line.toHtmlEscaped()));
+}
+
+QList<TwitchDockWidget::ChatEmoteOccurrence> TwitchDockWidget::parseIrcEmotes(const QString &emotesTag) const
+{
+    QList<ChatEmoteOccurrence> emotes;
+    if (emotesTag.isEmpty()) {
+        return emotes;
+    }
+
+    const QStringList emoteGroups = emotesTag.split(QLatin1Char('/'), Qt::SkipEmptyParts);
+    for (const QString &emoteGroup : emoteGroups) {
+        const int separatorIndex = emoteGroup.indexOf(QLatin1Char(':'));
+        if (separatorIndex <= 0) {
+            continue;
+        }
+
+        const QString emoteId = emoteGroup.left(separatorIndex);
+        const QStringList ranges = emoteGroup.mid(separatorIndex + 1).split(QLatin1Char(','), Qt::SkipEmptyParts);
+        for (const QString &range : ranges) {
+            const QStringList bounds = range.split(QLatin1Char('-'));
+            if (bounds.size() != 2) {
+                continue;
+            }
+
+            bool startOk = false;
+            bool endOk = false;
+            const int start = bounds.at(0).toInt(&startOk);
+            const int end = bounds.at(1).toInt(&endOk);
+            if (!startOk || !endOk || start < 0 || end < start) {
+                continue;
+            }
+
+            emotes.append({emoteId, start, end});
+        }
+    }
+
+    std::sort(emotes.begin(), emotes.end(), [](const ChatEmoteOccurrence &lhs, const ChatEmoteOccurrence &rhs) {
+        if (lhs.start == rhs.start) {
+            return lhs.end < rhs.end;
+        }
+        return lhs.start < rhs.start;
+    });
+    return emotes;
+}
+
+void TwitchDockWidget::enqueueChatMessage(const QString &timestamp,
+                                          const QString &username,
+                                          const QString &color,
+                                          const QString &message,
+                                          const QList<ChatEmoteOccurrence> &emotes)
+{
+    PendingChatMessage pendingMessage;
+    pendingMessage.timestamp = timestamp;
+    pendingMessage.username = username;
+    pendingMessage.color = color;
+    pendingMessage.message = message;
+    pendingMessage.emotes = emotes;
+
+    for (const ChatEmoteOccurrence &emote : emotes) {
+        pendingMessage.requiredEmoteIds.insert(emote.id);
+        if (!isEmoteAvailable(emote.id) && !pendingEmoteIds_.contains(emote.id)) {
+            requestEmoteImage(emote.id);
+        }
+    }
+
+    pendingChatMessages_.append(pendingMessage);
+    flushPendingChatMessages();
+}
+
+void TwitchDockWidget::flushPendingChatMessages()
+{
+    while (!pendingChatMessages_.isEmpty()) {
+        const PendingChatMessage &message = pendingChatMessages_.front();
+        bool ready = true;
+        for (const QString &emoteId : message.requiredEmoteIds) {
+            if (!isEmoteAvailable(emoteId)) {
+                ready = false;
+                break;
+            }
+        }
+
+        if (!ready) {
+            return;
+        }
+
+        renderChatMessage(message);
+        pendingChatMessages_.removeFirst();
+    }
+}
+
+void TwitchDockWidget::renderChatMessage(const PendingChatMessage &message)
+{
+    chatText_->moveCursor(QTextCursor::End);
+    QTextCursor cursor = chatText_->textCursor();
+    cursor.insertHtml(QStringLiteral("<span style='color:#8f8fa3;'>%1</span> <span style='color:%2; font-weight:600;'>%3</span>"
+                                     "<span style='color:#efeff1;'>:</span> ")
+                          .arg(message.timestamp, message.color, message.username.toHtmlEscaped()));
+
+    int currentIndex = 0;
+    for (const ChatEmoteOccurrence &emote : message.emotes) {
+        if (emote.start < currentIndex || emote.start >= message.message.size()) {
+            continue;
+        }
+
+        const int boundedEnd = std::min(emote.end, message.message.size() - 1);
+        if (boundedEnd < emote.start) {
+            continue;
+        }
+
+        cursor.insertText(message.message.mid(currentIndex, emote.start - currentIndex));
+
+        if (emoteImages_.contains(emote.id)) {
+            QTextImageFormat imageFormat;
+            imageFormat.setName(emoteResourceUrl(emote.id).toString());
+            imageFormat.setWidth(28);
+            imageFormat.setHeight(28);
+            imageFormat.setVerticalAlignment(QTextCharFormat::AlignMiddle);
+            cursor.insertImage(imageFormat);
+        } else {
+            cursor.insertText(message.message.mid(emote.start, boundedEnd - emote.start + 1));
+        }
+
+        currentIndex = boundedEnd + 1;
+    }
+
+    if (currentIndex < message.message.size()) {
+        cursor.insertText(message.message.mid(currentIndex));
+    }
+    cursor.insertBlock();
+    chatText_->setTextCursor(cursor);
+}
+
+void TwitchDockWidget::requestEmoteImage(const QString &emoteId)
+{
+    pendingEmoteIds_.insert(emoteId);
+
+    QNetworkReply *reply = networkManager_->get(QNetworkRequest(twitchEmoteUrl(emoteId)));
+    connect(reply, &QNetworkReply::finished, this, [this, reply, emoteId]() {
+        const QByteArray payload = reply->readAll();
+        const QNetworkReply::NetworkError error = reply->error();
+        reply->deleteLater();
+        pendingEmoteIds_.remove(emoteId);
+
+        if (error == QNetworkReply::NoError) {
+            QImage image;
+            if (image.loadFromData(payload)) {
+                emoteImages_.insert(emoteId, image);
+                chatText_->document()->addResource(QTextDocument::ImageResource, emoteResourceUrl(emoteId), image);
+                flushPendingChatMessages();
+                return;
+            }
+        }
+
+        unavailableEmoteIds_.insert(emoteId);
+        flushPendingChatMessages();
+    });
+}
+
+bool TwitchDockWidget::isEmoteAvailable(const QString &emoteId) const
+{
+    return emoteImages_.contains(emoteId) || unavailableEmoteIds_.contains(emoteId);
 }
 
 QByteArray TwitchDockWidget::buildIrcPass(const QString &oauthToken) const
