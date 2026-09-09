@@ -37,6 +37,11 @@ constexpr auto kTokenSettingsGroup = "ObsTwitchPlugin";
 constexpr auto kTokenSettingsKey = "twitch_oauth_token";
 constexpr quint16 kOAuthRedirectPort = 38471;
 
+QString oauthRedirectUrl()
+{
+    return QStringLiteral("http://localhost:%1").arg(kOAuthRedirectPort);
+}
+
 QString firstNonEmpty(obs_data_t *settings, const std::initializer_list<const char *> &keys)
 {
     for (const char *key : keys) {
@@ -112,8 +117,8 @@ void TwitchDockWidget::buildUi()
     tokenEdit_ = new QLineEdit(streamTab);
     tokenEdit_->setEchoMode(QLineEdit::PasswordEchoOnEdit);
     auto *oauthHelpLabel = new QLabel(
-        tr("Create a Twitch app in the Developer Console, add redirect URL http://127.0.0.1:%1, paste the Client ID and Client Secret here, then click Authorize in Browser.")
-            .arg(kOAuthRedirectPort),
+        tr("Create a Twitch app in the Developer Console, add redirect URL %1, paste the Client ID and Client Secret here, then click Authorize in Browser.")
+            .arg(oauthRedirectUrl()),
         streamTab);
     oauthHelpLabel->setWordWrap(true);
 
@@ -279,8 +284,8 @@ void TwitchDockWidget::ensureOAuthToken()
     const QString clientId = clientIdEdit_->text().trimmed();
     if (clientId.isEmpty()) {
         appendChatSystemMessage(
-            tr("Provide Twitch Client ID before starting OAuth. Use Open Twitch Developer Console and register redirect URL http://127.0.0.1:%1.")
-                .arg(kOAuthRedirectPort));
+            tr("Provide Twitch Client ID before starting OAuth. Use Open Twitch Developer Console and register redirect URL %1.")
+                .arg(oauthRedirectUrl()));
         return;
     }
 
@@ -294,7 +299,7 @@ void TwitchDockWidget::ensureOAuthToken()
     QUrlQuery query;
     query.addQueryItem(QStringLiteral("response_type"), QStringLiteral("code"));
     query.addQueryItem(QStringLiteral("client_id"), clientId);
-    query.addQueryItem(QStringLiteral("redirect_uri"), QStringLiteral("http://127.0.0.1:%1").arg(kOAuthRedirectPort));
+    query.addQueryItem(QStringLiteral("redirect_uri"), oauthRedirectUrl());
     query.addQueryItem(QStringLiteral("scope"), QStringLiteral("channel:manage:broadcast chat:read"));
     query.addQueryItem(QStringLiteral("force_verify"), QStringLiteral("false"));
     url.setQuery(query);
@@ -375,7 +380,7 @@ void TwitchDockWidget::exchangeOAuthCodeForToken(const QString &authorizationCod
     body.addQueryItem(QStringLiteral("client_secret"), clientSecret);
     body.addQueryItem(QStringLiteral("code"), authorizationCode);
     body.addQueryItem(QStringLiteral("grant_type"), QStringLiteral("authorization_code"));
-    body.addQueryItem(QStringLiteral("redirect_uri"), QStringLiteral("http://127.0.0.1:%1").arg(kOAuthRedirectPort));
+    body.addQueryItem(QStringLiteral("redirect_uri"), oauthRedirectUrl());
 
     QNetworkRequest request(url);
     request.setHeader(QNetworkRequest::ContentTypeHeader, QStringLiteral("application/x-www-form-urlencoded"));
