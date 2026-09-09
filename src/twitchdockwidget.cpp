@@ -964,15 +964,8 @@ void TwitchDockWidget::renderChatMessage(const PendingChatMessage &message)
     chatText_->moveCursor(QTextCursor::End);
     QTextCursor cursor = chatText_->textCursor();
     ensureChatEntryStartsOnNewLine(cursor);
-    cursor.insertHtml(QStringLiteral(
-                          "<table style='border-collapse:collapse; margin:0;'>"
-                          "<tr>"
-                          "<td style='color:#8f8fa3; padding:0 10px 0 0; vertical-align:top;'>%1</td>"
-                          "<td style='color:%2; font-weight:600; padding:0;'>%3</td>"
-                          "</tr>"
-                          "<tr>"
-                          "<td style='padding:0 10px 0 0;'>&nbsp;</td>"
-                          "<td style='padding:0;'>")
+    cursor.insertHtml(QStringLiteral("<span style='color:#8f8fa3;'>%1</span> <span style='color:%2;'>%3</span>"
+                                     "<span style='color:#efeff1;'>: </span>")
                           .arg(message.timestamp.toHtmlEscaped(), message.color, message.username.toHtmlEscaped()));
 
     QTextCharFormat messageFormat = cursor.charFormat();
@@ -1009,7 +1002,6 @@ void TwitchDockWidget::renderChatMessage(const PendingChatMessage &message)
     if (currentIndex < message.message.size()) {
         cursor.insertText(message.message.mid(currentIndex));
     }
-    cursor.insertHtml(QStringLiteral("</td></tr></table>"));
     cursor.insertBlock();
     chatText_->setTextCursor(cursor);
 }
