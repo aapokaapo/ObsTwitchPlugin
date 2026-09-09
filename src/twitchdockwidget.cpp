@@ -141,7 +141,8 @@ void TwitchDockWidget::buildUi()
     chatText_->setReadOnly(true);
     chatText_->document()->setMaximumBlockCount(2000);
     chatText_->setStyleSheet("QTextEdit { background-color: #0e0e10; color: #efeff1; border: 1px solid #2f3545; font-family: Inter, Segoe UI, sans-serif; font-size: 13px; }");
-    chatText_->setHtml(QStringLiteral("<span style='color:#adadb8;'>Twitch chat panel ready. Provide OAuth token, then join channel via IRC.</span>"));
+    chatText_->setHtml(QStringLiteral(
+        "<p style='margin:0; color:#adadb8;'>Twitch chat panel ready. Provide OAuth token, then join channel via IRC.</p>"));
 
     auto *chatRow = new QHBoxLayout();
     channelEdit_ = new QLineEdit(chatTab);
@@ -284,6 +285,14 @@ void TwitchDockWidget::refreshObsServiceData()
 
     if (!tokenEdit_->text().trimmed().isEmpty() && !clientIdEdit_->text().trimmed().isEmpty()) {
         fetchCurrentChannelInfo();
+    }
+
+    if (!chatAutoConnectAttempted_) {
+        const QString channel = sanitizeChannelLogin(channelEdit_->text());
+        if (!channel.isEmpty() && !tokenEdit_->text().trimmed().isEmpty()) {
+            chatAutoConnectAttempted_ = true;
+            connectChat();
+        }
     }
 }
 
