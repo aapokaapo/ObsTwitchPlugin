@@ -14,6 +14,21 @@ find_package(PkgConfig REQUIRED)
 pkg_check_modules(LIBOBS REQUIRED libobs)
 pkg_check_modules(OBS_FRONTEND REQUIRED obs-frontend-api)
 
+set(OBS_PLUGIN_INCLUDE_DIRS
+    ${LIBOBS_INCLUDE_DIRS}
+    ${OBS_FRONTEND_INCLUDE_DIRS}
+    ${LIBOBS_INCLUDEDIR}
+    ${OBS_FRONTEND_INCLUDEDIR}
+)
+
+foreach(_obs_include_dir IN LISTS OBS_PLUGIN_INCLUDE_DIRS)
+    if(_obs_include_dir AND EXISTS "${_obs_include_dir}/obs")
+        list(APPEND OBS_PLUGIN_INCLUDE_DIRS "${_obs_include_dir}/obs")
+    endif()
+endforeach()
+
+list(REMOVE_DUPLICATES OBS_PLUGIN_INCLUDE_DIRS)
+
 find_package(Qt6 REQUIRED COMPONENTS Core Widgets Network)
 
 add_library(obstwitchplugin MODULE
@@ -23,8 +38,7 @@ add_library(obstwitchplugin MODULE
 )
 
 target_include_directories(obstwitchplugin PRIVATE
-    ${LIBOBS_INCLUDE_DIRS}
-    ${OBS_FRONTEND_INCLUDE_DIRS}
+    ${OBS_PLUGIN_INCLUDE_DIRS}
 )
 
 target_link_directories(obstwitchplugin PRIVATE
