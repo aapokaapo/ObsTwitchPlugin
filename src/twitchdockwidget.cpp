@@ -195,7 +195,6 @@ TwitchDockWidget::TwitchCredentials TwitchDockWidget::extractCredentialsFromObs(
         obs_data_release(settings);
     }
 
-    obs_service_release(service);
     return credentials;
 }
 
