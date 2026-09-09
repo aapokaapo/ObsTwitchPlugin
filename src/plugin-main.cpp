@@ -45,8 +45,9 @@ bool obs_module_load(void)
 void obs_module_unload(void)
 {
     if (g_obsDock) {
-        obs_frontend_remove_dock(kDockId);
-        g_obsDock->deleteLater();
+        QDockWidget *dock = g_obsDock;
         g_obsDock = nullptr;
+        obs_frontend_remove_dock(kDockId);
+        delete dock;
     }
 }

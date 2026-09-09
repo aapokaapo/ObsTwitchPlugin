@@ -17,6 +17,7 @@
 #include <QRegularExpression>
 #include <QSettings>
 #include <QStandardPaths>
+#include <QTextDocument>
 #include <QUrl>
 #include <QUrlQuery>
 #include <QVBoxLayout>
@@ -71,6 +72,7 @@ void TwitchDockWidget::buildUi()
     auto *chatLayout = new QVBoxLayout(chatTab);
     chatText_ = new QTextEdit(chatTab);
     chatText_->setReadOnly(true);
+    chatText_->document()->setMaximumBlockCount(2000);
     chatText_->setStyleSheet("QTextEdit { background-color: #151923; color: #f0f4ff; border: 1px solid #2f3545; font-family: Monospace; }");
     chatText_->setPlainText("Twitch chat panel ready. Provide OAuth token, then join channel via IRC.");
 
