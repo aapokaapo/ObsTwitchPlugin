@@ -1,6 +1,8 @@
 #include "twitchdockwidget.h"
 
+#include <QCoreApplication>
 #include <QDockWidget>
+#include <QObject>
 
 extern "C" {
 #if __has_include(<obs/obs-frontend-api.h>)
@@ -26,6 +28,22 @@ MODULE_EXPORT const char *obs_module_description(void)
 
 static QDockWidget *g_obsDock = nullptr;
 
+static void destroyObsDock(bool removeFromFrontend)
+{
+    if (!g_obsDock) {
+        return;
+    }
+
+    QDockWidget *dock = g_obsDock;
+    g_obsDock = nullptr;
+
+    if (removeFromFrontend) {
+        obs_frontend_remove_dock(kDockId);
+    }
+
+    delete dock;
+}
+
 bool obs_module_load(void)
 {
     // Create a standard Qt dock and register it in OBS frontend UI.
@@ -39,15 +57,15 @@ bool obs_module_load(void)
         return false;
     }
 
+    QObject::connect(g_obsDock, &QObject::destroyed, []() { g_obsDock = nullptr; });
+    if (QCoreApplication *app = QCoreApplication::instance()) {
+        QObject::connect(app, &QCoreApplication::aboutToQuit, g_obsDock, []() { destroyObsDock(true); });
+    }
+
     return true;
 }
 
 void obs_module_unload(void)
 {
-    if (g_obsDock) {
-        QDockWidget *dock = g_obsDock;
-        g_obsDock = nullptr;
-        obs_frontend_remove_dock(kDockId);
-        delete dock;
-    }
+    destroyObsDock(true);
 }
