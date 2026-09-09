@@ -37,10 +37,20 @@ private:
     struct TwitchCredentials {
         QString streamKey;
         QString oauthToken;
+        QString clientId;
+        QString clientSecret;
     };
 
     void buildUi();
+    void loadPersistedUiState();
     void appendChatSystemMessage(const QString &message);
+    void appendFormattedChatLine(const QByteArray &ircLine);
+    QString sanitizeChannelLogin(const QString &value) const;
+    void persistChatChannel(const QString &channel);
+    QString loadCachedChatChannel() const;
+    void persistClientId(const QString &clientId);
+    QString loadCachedClientId() const;
+    void fetchCurrentChannelInfo();
 
     TwitchCredentials extractCredentialsFromObs() const;
     TwitchCredentials extractCredentialsFromObsProfileIni() const;

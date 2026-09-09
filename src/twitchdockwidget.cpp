@@ -6,6 +6,7 @@
 #include <QGridLayout>
 #include <QHostAddress>
 #include <QHBoxLayout>
+#include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QLabel>
@@ -19,6 +20,7 @@
 #include <QStandardPaths>
 #include <QTextDocument>
 #include <QTimer>
+#include <QTime>
 #include <QUrl>
 #include <QUrlQuery>
 #include <QVBoxLayout>
@@ -35,6 +37,8 @@ extern "C" {
 namespace {
 constexpr auto kTokenSettingsGroup = "ObsTwitchPlugin";
 constexpr auto kTokenSettingsKey = "twitch_oauth_token";
+constexpr auto kChatChannelSettingsKey = "chat_channel";
+constexpr auto kClientIdSettingsKey = "twitch_client_id";
 constexpr quint16 kOAuthRedirectPort = 38471;
 
 QString oauthRedirectUrl()
@@ -52,6 +56,19 @@ QString firstNonEmpty(obs_data_t *settings, const std::initializer_list<const ch
     }
     return {};
 }
+
+QString ircTagValue(const QString &tags, const QString &key)
+{
+    const QString prefix = key + QLatin1Char('=');
+    const QStringList parts = tags.split(QLatin1Char(';'));
+    for (const QString &part : parts) {
+        if (!part.startsWith(prefix)) {
+            continue;
+        }
+        return part.mid(prefix.size());
+    }
+    return {};
+}
 }
 
 TwitchDockWidget::TwitchDockWidget(QWidget *parent)
@@ -65,6 +82,7 @@ TwitchDockWidget::TwitchDockWidget(QWidget *parent)
     connect(oauthServer_, &QTcpServer::newConnection, this, &TwitchDockWidget::onOAuthServerConnection);
     connect(chatSocket_, &QTcpSocket::readyRead, this, &TwitchDockWidget::onChatSocketReadyRead);
 
+    loadPersistedUiState();
     QTimer::singleShot(0, this, &TwitchDockWidget::refreshObsServiceData);
 }
 
@@ -90,12 +108,15 @@ void TwitchDockWidget::buildUi()
     chatText_ = new QTextEdit(chatTab);
     chatText_->setReadOnly(true);
     chatText_->document()->setMaximumBlockCount(2000);
-    chatText_->setStyleSheet("QTextEdit { background-color: #151923; color: #f0f4ff; border: 1px solid #2f3545; font-family: Monospace; }");
-    chatText_->setPlainText("Twitch chat panel ready. Provide OAuth token, then join channel via IRC.");
+    chatText_->setStyleSheet("QTextEdit { background-color: #0e0e10; color: #efeff1; border: 1px solid #2f3545; font-family: Inter, Segoe UI, sans-serif; font-size: 13px; }");
+    chatText_->setHtml(QStringLiteral("<span style='color:#adadb8;'>Twitch chat panel ready. Provide OAuth token, then join channel via IRC.</span>"));
 
     auto *chatRow = new QHBoxLayout();
     channelEdit_ = new QLineEdit(chatTab);
     channelEdit_->setPlaceholderText(tr("Channel login (e.g. yourname)"));
+    connect(channelEdit_, &QLineEdit::editingFinished, this, [this]() {
+        persistChatChannel(sanitizeChannelLogin(channelEdit_->text()));
+    });
     auto *chatConnectButton = new QPushButton(tr("Connect Chat"), chatTab);
     chatRow->addWidget(channelEdit_);
     chatRow->addWidget(chatConnectButton);
@@ -112,10 +133,11 @@ void TwitchDockWidget::buildUi()
     titleEdit_ = new QLineEdit(streamTab);
     gameIdEdit_ = new QLineEdit(streamTab);
     clientIdEdit_ = new QLineEdit(streamTab);
+    clientIdEdit_->setEchoMode(QLineEdit::Password);
     clientSecretEdit_ = new QLineEdit(streamTab);
     clientSecretEdit_->setEchoMode(QLineEdit::Password);
     tokenEdit_ = new QLineEdit(streamTab);
-    tokenEdit_->setEchoMode(QLineEdit::PasswordEchoOnEdit);
+    tokenEdit_->setEchoMode(QLineEdit::Password);
     auto *oauthHelpLabel = new QLabel(
         tr("Create a Twitch app in the Developer Console, add redirect URL %1, paste the Client ID and Client Secret here, then click Authorize in Browser.")
             .arg(oauthRedirectUrl()),
@@ -197,10 +219,23 @@ void TwitchDockWidget::refreshObsServiceData()
     } else {
         tokenEdit_->setText(loadCachedOAuthToken());
     }
+    if (!credentials.clientId.isEmpty()) {
+        clientIdEdit_->setText(credentials.clientId);
+        persistClientId(credentials.clientId);
+    } else {
+        clientIdEdit_->setText(loadCachedClientId());
+    }
+    if (!credentials.clientSecret.isEmpty()) {
+        clientSecretEdit_->setText(credentials.clientSecret);
+    }
 
     appendChatSystemMessage(
         credentials.streamKey.isEmpty() ? tr("Stream key not found in current OBS service/profile settings.")
                                         : tr("Stream key found in OBS settings."));
+
+    if (!tokenEdit_->text().trimmed().isEmpty() && !clientIdEdit_->text().trimmed().isEmpty()) {
+        fetchCurrentChannelInfo();
+    }
 }
 
 void TwitchDockWidget::openTwitchDeveloperConsole()
@@ -228,6 +263,8 @@ TwitchDockWidget::TwitchCredentials TwitchDockWidget::extractCredentialsFromObs(
         // Field names vary by service/profile; check common variants.
         credentials.streamKey = firstNonEmpty(settings, {"key", "stream_key", "streamKey"});
         credentials.oauthToken = firstNonEmpty(settings, {"oauth_token", "token", "access_token", "auth"});
+        credentials.clientId = firstNonEmpty(settings, {"client_id", "clientid", "twitch_client_id"});
+        credentials.clientSecret = firstNonEmpty(settings, {"client_secret", "clientsecret", "twitch_client_secret"});
         obs_data_release(settings);
     }
 
@@ -264,9 +301,16 @@ TwitchDockWidget::TwitchCredentials TwitchDockWidget::extractCredentialsFromObsP
             if (credentials.oauthToken.isEmpty() && (lowerKey.contains("oauth") || lowerKey.contains("token"))) {
                 credentials.oauthToken = value;
             }
+            if (credentials.clientId.isEmpty() && (lowerKey.contains("clientid") || lowerKey.contains("client_id"))) {
+                credentials.clientId = value;
+            }
+            if (credentials.clientSecret.isEmpty() &&
+                (lowerKey.contains("clientsecret") || lowerKey.contains("client_secret"))) {
+                credentials.clientSecret = value;
+            }
         }
 
-        if (!credentials.streamKey.isEmpty() && !credentials.oauthToken.isEmpty()) {
+        if (!credentials.streamKey.isEmpty() && !credentials.oauthToken.isEmpty() && !credentials.clientId.isEmpty()) {
             break;
         }
     }
@@ -288,6 +332,7 @@ void TwitchDockWidget::ensureOAuthToken()
                 .arg(oauthRedirectUrl()));
         return;
     }
+    persistClientId(clientId);
 
     startOAuthServer();
     if (!oauthServer_->isListening()) {
@@ -411,6 +456,7 @@ void TwitchDockWidget::exchangeOAuthCodeForToken(const QString &authorizationCod
         tokenEdit_->setText(token);
         persistOAuthToken(token);
         appendChatSystemMessage(tr("OAuth token exchange succeeded and token was cached."));
+        fetchCurrentChannelInfo();
     });
 }
 
@@ -440,6 +486,79 @@ QString TwitchDockWidget::loadCachedOAuthToken() const
     const QString token = settings.value(kTokenSettingsKey).toString().trimmed();
     settings.endGroup();
     return token;
+}
+
+void TwitchDockWidget::persistClientId(const QString &clientId)
+{
+    const QString value = clientId.trimmed();
+    if (value.isEmpty()) {
+        return;
+    }
+
+    const QString configDir = QStandardPaths::writableLocation(QStandardPaths::AppConfigLocation);
+    QDir().mkpath(configDir);
+
+    const QString settingsPath = configDir + QStringLiteral("/obstwitchplugin.ini");
+    QSettings settings(settingsPath, QSettings::IniFormat);
+    settings.beginGroup(kTokenSettingsGroup);
+    settings.setValue(kClientIdSettingsKey, value);
+    settings.endGroup();
+    settings.sync();
+}
+
+QString TwitchDockWidget::loadCachedClientId() const
+{
+    const QString configDir = QStandardPaths::writableLocation(QStandardPaths::AppConfigLocation);
+    const QString settingsPath = configDir + QStringLiteral("/obstwitchplugin.ini");
+
+    QSettings settings(settingsPath, QSettings::IniFormat);
+    settings.beginGroup(kTokenSettingsGroup);
+    const QString clientId = settings.value(kClientIdSettingsKey).toString().trimmed();
+    settings.endGroup();
+    return clientId;
+}
+
+void TwitchDockWidget::persistChatChannel(const QString &channel)
+{
+    const QString normalized = sanitizeChannelLogin(channel);
+
+    const QString configDir = QStandardPaths::writableLocation(QStandardPaths::AppConfigLocation);
+    QDir().mkpath(configDir);
+
+    const QString settingsPath = configDir + QStringLiteral("/obstwitchplugin.ini");
+    QSettings settings(settingsPath, QSettings::IniFormat);
+    settings.beginGroup(kTokenSettingsGroup);
+    settings.setValue(kChatChannelSettingsKey, normalized);
+    settings.endGroup();
+    settings.sync();
+}
+
+QString TwitchDockWidget::loadCachedChatChannel() const
+{
+    const QString configDir = QStandardPaths::writableLocation(QStandardPaths::AppConfigLocation);
+    const QString settingsPath = configDir + QStringLiteral("/obstwitchplugin.ini");
+
+    QSettings settings(settingsPath, QSettings::IniFormat);
+    settings.beginGroup(kTokenSettingsGroup);
+    const QString channel = settings.value(kChatChannelSettingsKey).toString().trimmed();
+    settings.endGroup();
+    return sanitizeChannelLogin(channel);
+}
+
+QString TwitchDockWidget::sanitizeChannelLogin(const QString &value) const
+{
+    QString channel = value.trimmed();
+    if (channel.startsWith(QLatin1Char('#'))) {
+        channel.remove(0, 1);
+    }
+    return channel;
+}
+
+void TwitchDockWidget::loadPersistedUiState()
+{
+    channelEdit_->setText(loadCachedChatChannel());
+    clientIdEdit_->setText(loadCachedClientId());
+    tokenEdit_->setText(loadCachedOAuthToken());
 }
 
 void TwitchDockWidget::resolveIdentity(const QString &token, std::function<void(bool)> continuation)
@@ -553,7 +672,10 @@ void TwitchDockWidget::connectChat()
             return;
         }
 
-        const QString channel = channelEdit_->text().trimmed().isEmpty() ? twitchLogin_ : channelEdit_->text().trimmed();
+        const QString configuredChannel = sanitizeChannelLogin(channelEdit_->text());
+        const QString channel = configuredChannel.isEmpty() ? twitchLogin_ : configuredChannel;
+        channelEdit_->setText(channel);
+        persistChatChannel(channel);
 
         if (chatSocket_->state() != QAbstractSocket::UnconnectedState) {
             chatSocket_->abort();
@@ -584,13 +706,47 @@ void TwitchDockWidget::onChatSocketReadyRead()
             chatSocket_->write("PONG :tmi.twitch.tv\r\n");
             continue;
         }
-        chatText_->append(QString::fromUtf8(line));
+        appendFormattedChatLine(line);
     }
 }
 
 void TwitchDockWidget::appendChatSystemMessage(const QString &message)
 {
-    chatText_->append(QStringLiteral("[system] %1").arg(message));
+    chatText_->append(QStringLiteral("<span style='color:#adadb8;'>[system]</span> <span style='color:#d3d3da;'>%1</span>")
+                          .arg(message.toHtmlEscaped()));
+}
+
+void TwitchDockWidget::appendFormattedChatLine(const QByteArray &ircLine)
+{
+    const QString line = QString::fromUtf8(ircLine);
+    const QString timestamp = QTime::currentTime().toString(QStringLiteral("HH:mm"));
+
+    static const QRegularExpression messagePattern(
+        QStringLiteral("^@([^\\s]+)\\s+:[^\\s]+\\s+PRIVMSG\\s+#[^\\s]+\\s+:(.*)$"));
+    const QRegularExpressionMatch messageMatch = messagePattern.match(line);
+    if (messageMatch.hasMatch()) {
+        const QString tags = messageMatch.captured(1);
+        const QString message = messageMatch.captured(2).toHtmlEscaped();
+        const QString displayName = ircTagValue(tags, QStringLiteral("display-name"));
+        const QString username = displayName.isEmpty() ? QStringLiteral("user") : displayName.toHtmlEscaped();
+        const QString colorValue = ircTagValue(tags, QStringLiteral("color"));
+        const QString color = colorValue.isEmpty() ? QStringLiteral("#bf94ff") : colorValue;
+        chatText_->append(QStringLiteral("<span style='color:#8f8fa3;'>%1</span> <span style='color:%2; font-weight:600;'>%3</span>"
+                                         "<span style='color:#efeff1;'>:</span> <span style='color:#efeff1;'>%4</span>")
+                              .arg(timestamp, color, username, message));
+        return;
+    }
+
+    static const QRegularExpression noticePattern(QStringLiteral("NOTICE\\s+#[^\\s]+\\s+:(.*)$"));
+    const QRegularExpressionMatch noticeMatch = noticePattern.match(line);
+    if (noticeMatch.hasMatch()) {
+        chatText_->append(QStringLiteral("<span style='color:#8f8fa3;'>%1</span> <span style='color:#f7c843;'>[notice]</span> %2")
+                              .arg(timestamp, noticeMatch.captured(1).toHtmlEscaped()));
+        return;
+    }
+
+    chatText_->append(QStringLiteral("<span style='color:#8f8fa3;'>%1</span> <span style='color:#adadb8;'>%2</span>")
+                          .arg(timestamp, line.toHtmlEscaped()));
 }
 
 QByteArray TwitchDockWidget::buildIrcPass(const QString &oauthToken) const
@@ -627,4 +783,56 @@ void TwitchDockWidget::openSelectedFriendLink()
     }
 
     QDesktopServices::openUrl(QUrl(item->text()));
+}
+
+void TwitchDockWidget::fetchCurrentChannelInfo()
+{
+    const QString token = tokenEdit_->text().trimmed();
+    const QString clientId = clientIdEdit_->text().trimmed();
+    if (token.isEmpty() || clientId.isEmpty()) {
+        return;
+    }
+
+    resolveIdentity(token, [this, token, clientId](bool ok) {
+        if (!ok) {
+            return;
+        }
+
+        QUrl url(QStringLiteral("https://api.twitch.tv/helix/channels"));
+        QUrlQuery query;
+        query.addQueryItem(QStringLiteral("broadcaster_id"), broadcasterId_);
+        url.setQuery(query);
+
+        QNetworkRequest request(url);
+        request.setRawHeader("Authorization", QByteArray("Bearer ") + token.toUtf8());
+        request.setRawHeader("Client-Id", clientId.toUtf8());
+
+        QNetworkReply *reply = networkManager_->get(request);
+        connect(reply, &QNetworkReply::finished, this, [this, reply]() {
+            const QByteArray payloadBytes = reply->readAll();
+            const QNetworkReply::NetworkError error = reply->error();
+            const QString errorString = reply->errorString();
+            reply->deleteLater();
+
+            if (error != QNetworkReply::NoError) {
+                appendChatSystemMessage(tr("Unable to fetch current stream title/game: %1").arg(errorString));
+                return;
+            }
+
+            const QJsonObject payload = QJsonDocument::fromJson(payloadBytes).object();
+            const QJsonArray data = payload.value(QStringLiteral("data")).toArray();
+            if (data.isEmpty()) {
+                appendChatSystemMessage(tr("No current channel info returned from Twitch API."));
+                return;
+            }
+
+            const QJsonObject channel = data.first().toObject();
+            titleEdit_->setText(channel.value(QStringLiteral("title")).toString().trimmed());
+            gameIdEdit_->setText(channel.value(QStringLiteral("game_id")).toString().trimmed());
+            const QString gameName = channel.value(QStringLiteral("game_name")).toString().trimmed();
+            appendChatSystemMessage(
+                tr("Loaded current stream info from Twitch (title and game%1).")
+                    .arg(gameName.isEmpty() ? QString() : QStringLiteral(": %1").arg(gameName)));
+        });
+    });
 }
