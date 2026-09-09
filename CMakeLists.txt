@@ -32,6 +32,12 @@ target_link_directories(obstwitchplugin PRIVATE
     ${OBS_FRONTEND_LIBRARY_DIRS}
 )
 
+foreach(_obs_flags_var LIBOBS_CFLAGS_OTHER OBS_FRONTEND_CFLAGS_OTHER)
+    if(DEFINED ${_obs_flags_var})
+        list(FILTER ${_obs_flags_var} EXCLUDE REGEX "^-std=")
+    endif()
+endforeach()
+
 target_compile_options(obstwitchplugin PRIVATE
     ${LIBOBS_CFLAGS_OTHER}
     ${OBS_FRONTEND_CFLAGS_OTHER}
