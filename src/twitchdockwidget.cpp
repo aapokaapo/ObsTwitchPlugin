@@ -13,11 +13,13 @@
 #include <QListWidgetItem>
 #include <QNetworkReply>
 #include <QNetworkRequest>
+#include <QColor>
 #include <QPushButton>
 #include <QPointer>
 #include <QRegularExpression>
 #include <QSettings>
 #include <QStandardPaths>
+#include <QTextBlock>
 #include <QTextCursor>
 #include <QTextDocument>
 #include <QTextImageFormat>
@@ -45,7 +47,15 @@ constexpr auto kChatChannelSettingsKey = "chat_channel";
 constexpr auto kClientIdSettingsKey = "twitch_client_id";
 constexpr quint16 kOAuthRedirectPort = 38471;
 constexpr auto kDefaultChatColor = "#bf94ff";
+constexpr auto kChatMessageTextColor = "#efeff1";
 constexpr int kCategorySuggestionLimit = 20;
+
+void ensureChatEntryStartsOnNewLine(QTextCursor &cursor)
+{
+    if (cursor.block().length() > 1 || cursor.positionInBlock() > 0) {
+        cursor.insertBlock();
+    }
+}
 
 QString oauthRedirectUrl()
 {
@@ -809,8 +819,13 @@ void TwitchDockWidget::onChatSocketReadyRead()
 
 void TwitchDockWidget::appendChatSystemMessage(const QString &message)
 {
-    chatText_->append(QStringLiteral("<span style='color:#adadb8;'>[system]</span> <span style='color:#d3d3da;'>%1</span>")
+    chatText_->moveCursor(QTextCursor::End);
+    QTextCursor cursor = chatText_->textCursor();
+    ensureChatEntryStartsOnNewLine(cursor);
+    cursor.insertHtml(QStringLiteral("<span style='color:#adadb8;'>[system]</span> <span style='color:#d3d3da;'>%1</span>")
                           .arg(message.toHtmlEscaped()));
+    cursor.insertBlock();
+    chatText_->setTextCursor(cursor);
 }
 
 void TwitchDockWidget::appendFormattedChatLine(const QByteArray &ircLine)
@@ -834,8 +849,14 @@ void TwitchDockWidget::appendFormattedChatLine(const QByteArray &ircLine)
     static const QRegularExpression noticePattern(QStringLiteral("NOTICE\\s+#[^\\s]+\\s+:(.*)$"));
     const QRegularExpressionMatch noticeMatch = noticePattern.match(line);
     if (noticeMatch.hasMatch()) {
-        chatText_->append(QStringLiteral("<span style='color:#8f8fa3;'>%1</span> <span style='color:#f7c843;'>[notice]</span> %2")
+        chatText_->moveCursor(QTextCursor::End);
+        QTextCursor cursor = chatText_->textCursor();
+        ensureChatEntryStartsOnNewLine(cursor);
+        cursor.insertHtml(QStringLiteral("<span style='color:#8f8fa3;'>%1</span> <span style='color:#f7c843;'>[notice]</span> "
+                                         "<span style='color:#efeff1;'>%2</span>")
                               .arg(timestamp, noticeMatch.captured(1).toHtmlEscaped()));
+        cursor.insertBlock();
+        chatText_->setTextCursor(cursor);
         return;
     }
 
@@ -942,9 +963,14 @@ void TwitchDockWidget::renderChatMessage(const PendingChatMessage &message)
 {
     chatText_->moveCursor(QTextCursor::End);
     QTextCursor cursor = chatText_->textCursor();
+    ensureChatEntryStartsOnNewLine(cursor);
     cursor.insertHtml(QStringLiteral("<span style='color:#8f8fa3;'>%1</span> <span style='color:%2; font-weight:600;'>%3</span>")
                           .arg(message.timestamp, message.color, message.username.toHtmlEscaped()));
     cursor.insertBlock();
+
+    QTextCharFormat messageFormat = cursor.charFormat();
+    messageFormat.setForeground(QColor(QStringLiteral(kChatMessageTextColor)));
+    cursor.setCharFormat(messageFormat);
 
     int currentIndex = 0;
     for (const ChatEmoteOccurrence &emote : message.emotes) {
