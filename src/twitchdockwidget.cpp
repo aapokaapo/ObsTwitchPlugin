@@ -969,7 +969,7 @@ void TwitchDockWidget::renderChatMessage(const PendingChatMessage &message)
     cursor.insertBlock();
 
     QTextCharFormat messageFormat = cursor.charFormat();
-    messageFormat.setForeground(QColor(QStringLiteral(kChatMessageTextColor)));
+    messageFormat.setForeground(QColor(QString::fromLatin1(kChatMessageTextColor)));
     cursor.setCharFormat(messageFormat);
 
     int currentIndex = 0;
