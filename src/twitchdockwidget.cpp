@@ -78,7 +78,7 @@ QString ircTagValue(const QString &tags, const QString &key)
 QString sanitizeChatColor(const QString &colorValue)
 {
     static const QRegularExpression hexColorPattern(QStringLiteral("^#[0-9A-Fa-f]{6}$"));
-    return hexColorPattern.match(colorValue).hasMatch() ? colorValue : QStringLiteral(kDefaultChatColor);
+    return hexColorPattern.match(colorValue).hasMatch() ? colorValue : QString::fromLatin1(kDefaultChatColor);
 }
 
 QUrl twitchEmoteUrl(const QString &emoteId)
@@ -887,7 +887,7 @@ void TwitchDockWidget::renderChatMessage(const PendingChatMessage &message)
             continue;
         }
 
-        const int boundedEnd = std::min(emote.end, message.message.size() - 1);
+        const int boundedEnd = std::min(emote.end, static_cast<int>(message.message.size()) - 1);
         if (boundedEnd < emote.start) {
             continue;
         }
