@@ -81,6 +81,16 @@ QString sanitizeChatColor(const QString &colorValue)
     return hexColorPattern.match(colorValue).hasMatch() ? colorValue : QString::fromLatin1(kDefaultChatColor);
 }
 
+QString ircCommand(const QString &line)
+{
+    static const QRegularExpression commandPattern(QStringLiteral("^(?:@[^\\s]+\\s+)?(?::[^\\s]+\\s+)?([^\\s]+)"));
+    const QRegularExpressionMatch match = commandPattern.match(line);
+    if (!match.hasMatch()) {
+        return {};
+    }
+    return match.captured(1).toUpper();
+}
+
 QUrl twitchEmoteUrl(const QString &emoteId)
 {
     return QUrl(QStringLiteral("https://static-cdn.jtvnw.net/emoticons/v2/%1/default/dark/2.0").arg(emoteId));
@@ -156,6 +166,9 @@ void TwitchDockWidget::buildUi()
     gameIdEdit_ = new QLineEdit(streamTab);
     clientIdEdit_ = new QLineEdit(streamTab);
     clientIdEdit_->setEchoMode(QLineEdit::Password);
+    connect(clientIdEdit_, &QLineEdit::editingFinished, this, [this]() {
+        persistClientId(clientIdEdit_->text());
+    });
     clientSecretEdit_ = new QLineEdit(streamTab);
     clientSecretEdit_->setEchoMode(QLineEdit::Password);
     tokenEdit_ = new QLineEdit(streamTab);
@@ -654,6 +667,10 @@ void TwitchDockWidget::updateChannelInfo()
     const QString title = titleEdit_->text().trimmed();
     const QString gameId = gameIdEdit_->text().trimmed();
 
+    if (!clientId.isEmpty()) {
+        persistClientId(clientId);
+    }
+
     if (token.isEmpty() || clientId.isEmpty()) {
         appendChatSystemMessage(tr("Cannot patch channel info: missing OAuth token or client ID."));
         return;
@@ -781,8 +798,15 @@ void TwitchDockWidget::appendFormattedChatLine(const QByteArray &ircLine)
         return;
     }
 
-    chatText_->append(QStringLiteral("<span style='color:#8f8fa3;'>%1</span> <span style='color:#adadb8;'>%2</span>")
-                          .arg(timestamp, line.toHtmlEscaped()));
+    const QString command = ircCommand(line);
+    if (command == QStringLiteral("JOIN") || command == QStringLiteral("PART") || command == QStringLiteral("CAP") ||
+        command == QStringLiteral("GLOBALUSERSTATE") || command == QStringLiteral("USERSTATE") ||
+        command == QStringLiteral("ROOMSTATE") || command == QStringLiteral("353") || command == QStringLiteral("366") ||
+        command == QStringLiteral("001") || command == QStringLiteral("002") || command == QStringLiteral("003") ||
+        command == QStringLiteral("004") || command == QStringLiteral("372") || command == QStringLiteral("375") ||
+        command == QStringLiteral("376")) {
+        return;
+    }
 }
 
 QList<TwitchDockWidget::ChatEmoteOccurrence> TwitchDockWidget::parseIrcEmotes(const QString &emotesTag) const
