@@ -22,7 +22,11 @@
 #include <QVBoxLayout>
 
 extern "C" {
+#if __has_include(<obs/obs-frontend-api.h>)
+#include <obs/obs-frontend-api.h>
+#else
 #include <obs-frontend-api.h>
+#endif
 #include <obs-module.h>
 }
 
@@ -176,7 +180,7 @@ TwitchDockWidget::TwitchCredentials TwitchDockWidget::extractCredentialsFromObs(
     TwitchCredentials credentials;
 
     // OBS frontend API gives us the currently selected streaming service object.
-    obs_service_t *service = obs_frontend_get_current_service();
+    obs_service_t *service = obs_frontend_get_streaming_service();
     if (!service) {
         return credentials;
     }
