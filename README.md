@@ -30,6 +30,9 @@ From the repository root:
 ```bash
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build
+cmake --install build
 ```
 
 The built module will be produced in the `build` directory as `obstwitchplugin` (platform-specific extension).
+
+On Fedora 44, the default install location is `~/.config/obs-studio/plugins/obstwitchplugin/bin/64bit/obstwitchplugin.so`. Override `CMAKE_INSTALL_PREFIX` if you need a different OBS plugin directory.
