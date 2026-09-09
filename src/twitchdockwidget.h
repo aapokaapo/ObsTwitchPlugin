@@ -20,6 +20,7 @@ public:
 
 private slots:
     void refreshObsServiceData();
+    void openTwitchDeveloperConsole();
     void ensureOAuthToken();
     void updateChannelInfo();
 

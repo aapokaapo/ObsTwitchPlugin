@@ -111,26 +111,35 @@ void TwitchDockWidget::buildUi()
     clientSecretEdit_->setEchoMode(QLineEdit::Password);
     tokenEdit_ = new QLineEdit(streamTab);
     tokenEdit_->setEchoMode(QLineEdit::PasswordEchoOnEdit);
+    auto *oauthHelpLabel = new QLabel(
+        tr("Create a Twitch app in the Developer Console, add redirect URL http://127.0.0.1:%1, paste the Client ID and Client Secret here, then click Authorize in Browser.")
+            .arg(kOAuthRedirectPort),
+        streamTab);
+    oauthHelpLabel->setWordWrap(true);
 
     auto *refreshButton = new QPushButton(tr("Refresh OBS Twitch Settings"), streamTab);
-    auto *oauthButton = new QPushButton(tr("Login with Twitch (OAuth)"), streamTab);
+    auto *developerConsoleButton = new QPushButton(tr("Open Twitch Developer Console"), streamTab);
+    auto *oauthButton = new QPushButton(tr("Authorize in Browser"), streamTab);
     auto *updateButton = new QPushButton(tr("Update Channel Info"), streamTab);
 
-    streamLayout->addWidget(new QLabel(tr("Stream Title"), streamTab), 0, 0);
-    streamLayout->addWidget(titleEdit_, 0, 1);
-    streamLayout->addWidget(new QLabel(tr("Category Game ID"), streamTab), 1, 0);
-    streamLayout->addWidget(gameIdEdit_, 1, 1);
-    streamLayout->addWidget(new QLabel(tr("Twitch Client ID"), streamTab), 2, 0);
-    streamLayout->addWidget(clientIdEdit_, 2, 1);
-    streamLayout->addWidget(new QLabel(tr("Twitch Client Secret"), streamTab), 3, 0);
-    streamLayout->addWidget(clientSecretEdit_, 3, 1);
-    streamLayout->addWidget(new QLabel(tr("OAuth ******"), streamTab), 4, 0);
-    streamLayout->addWidget(tokenEdit_, 4, 1);
-    streamLayout->addWidget(refreshButton, 5, 0, 1, 2);
-    streamLayout->addWidget(oauthButton, 6, 0, 1, 2);
-    streamLayout->addWidget(updateButton, 7, 0, 1, 2);
+    streamLayout->addWidget(oauthHelpLabel, 0, 0, 1, 2);
+    streamLayout->addWidget(new QLabel(tr("Stream Title"), streamTab), 1, 0);
+    streamLayout->addWidget(titleEdit_, 1, 1);
+    streamLayout->addWidget(new QLabel(tr("Category Game ID"), streamTab), 2, 0);
+    streamLayout->addWidget(gameIdEdit_, 2, 1);
+    streamLayout->addWidget(new QLabel(tr("Twitch Client ID"), streamTab), 3, 0);
+    streamLayout->addWidget(clientIdEdit_, 3, 1);
+    streamLayout->addWidget(new QLabel(tr("Twitch Client Secret"), streamTab), 4, 0);
+    streamLayout->addWidget(clientSecretEdit_, 4, 1);
+    streamLayout->addWidget(new QLabel(tr("OAuth Token"), streamTab), 5, 0);
+    streamLayout->addWidget(tokenEdit_, 5, 1);
+    streamLayout->addWidget(refreshButton, 6, 0, 1, 2);
+    streamLayout->addWidget(developerConsoleButton, 7, 0, 1, 2);
+    streamLayout->addWidget(oauthButton, 8, 0, 1, 2);
+    streamLayout->addWidget(updateButton, 9, 0, 1, 2);
 
     connect(refreshButton, &QPushButton::clicked, this, &TwitchDockWidget::refreshObsServiceData);
+    connect(developerConsoleButton, &QPushButton::clicked, this, &TwitchDockWidget::openTwitchDeveloperConsole);
     connect(oauthButton, &QPushButton::clicked, this, &TwitchDockWidget::ensureOAuthToken);
     connect(updateButton, &QPushButton::clicked, this, &TwitchDockWidget::updateChannelInfo);
 
@@ -187,6 +196,16 @@ void TwitchDockWidget::refreshObsServiceData()
     appendChatSystemMessage(
         credentials.streamKey.isEmpty() ? tr("Stream key not found in current OBS service/profile settings.")
                                         : tr("Stream key found in OBS settings."));
+}
+
+void TwitchDockWidget::openTwitchDeveloperConsole()
+{
+    const QUrl url(QStringLiteral("https://dev.twitch.tv/console/apps"));
+    if (QDesktopServices::openUrl(url)) {
+        appendChatSystemMessage(tr("Opened Twitch Developer Console in your browser."));
+    } else {
+        appendChatSystemMessage(tr("Could not open Twitch Developer Console in your browser."));
+    }
 }
 
 TwitchDockWidget::TwitchCredentials TwitchDockWidget::extractCredentialsFromObs() const
@@ -259,7 +278,9 @@ void TwitchDockWidget::ensureOAuthToken()
 
     const QString clientId = clientIdEdit_->text().trimmed();
     if (clientId.isEmpty()) {
-        appendChatSystemMessage(tr("Provide Twitch Client ID before starting OAuth."));
+        appendChatSystemMessage(
+            tr("Provide Twitch Client ID before starting OAuth. Use Open Twitch Developer Console and register redirect URL http://127.0.0.1:%1.")
+                .arg(kOAuthRedirectPort));
         return;
     }
 
