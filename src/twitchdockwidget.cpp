@@ -2,7 +2,6 @@
 
 #include <QDesktopServices>
 #include <QDir>
-#include <QEventLoop>
 #include <QFile>
 #include <QGridLayout>
 #include <QHostAddress>
@@ -14,10 +13,12 @@
 #include <QNetworkReply>
 #include <QNetworkRequest>
 #include <QPushButton>
+#include <QPointer>
 #include <QRegularExpression>
 #include <QSettings>
 #include <QStandardPaths>
 #include <QTextDocument>
+#include <QTimer>
 #include <QUrl>
 #include <QUrlQuery>
 #include <QVBoxLayout>
@@ -59,7 +60,18 @@ TwitchDockWidget::TwitchDockWidget(QWidget *parent)
     connect(oauthServer_, &QTcpServer::newConnection, this, &TwitchDockWidget::onOAuthServerConnection);
     connect(chatSocket_, &QTcpSocket::readyRead, this, &TwitchDockWidget::onChatSocketReadyRead);
 
-    refreshObsServiceData();
+    QTimer::singleShot(0, this, &TwitchDockWidget::refreshObsServiceData);
+}
+
+TwitchDockWidget::~TwitchDockWidget()
+{
+    if (oauthServer_) {
+        oauthServer_->close();
+    }
+
+    if (chatSocket_) {
+        chatSocket_->abort();
+    }
 }
 
 void TwitchDockWidget::buildUi()
@@ -288,8 +300,19 @@ void TwitchDockWidget::onOAuthServerConnection()
 {
     while (oauthServer_->hasPendingConnections()) {
         QTcpSocket *socket = oauthServer_->nextPendingConnection();
-        connect(socket, &QTcpSocket::readyRead, this, [this, socket]() {
-            handleOAuthRedirectPayload(socket->readAll(), socket);
+        if (!socket) {
+            continue;
+        }
+
+        socket->setParent(this);
+        connect(socket, &QTcpSocket::disconnected, socket, &QObject::deleteLater);
+
+        connect(socket, &QTcpSocket::readyRead, this, [this, socket = QPointer<QTcpSocket>(socket)]() {
+            if (!socket) {
+                return;
+            }
+
+            handleOAuthRedirectPayload(socket->readAll(), socket.data());
         });
     }
 }
@@ -337,28 +360,32 @@ void TwitchDockWidget::exchangeOAuthCodeForToken(const QString &authorizationCod
     request.setHeader(QNetworkRequest::ContentTypeHeader, QStringLiteral("application/x-www-form-urlencoded"));
 
     QNetworkReply *reply = networkManager_->post(request, body.query(QUrl::FullyEncoded).toUtf8());
-    QEventLoop loop;
-    connect(reply, &QNetworkReply::finished, &loop, &QEventLoop::quit);
-    loop.exec();
-
-    if (reply->error() != QNetworkReply::NoError) {
-        appendChatSystemMessage(tr("OAuth token exchange failed: %1").arg(reply->errorString()));
+    connect(reply, &QNetworkReply::finished, this, [this, reply]() {
+        const QByteArray payloadBytes = reply->readAll();
+        const QNetworkReply::NetworkError error = reply->error();
+        const QString errorString = reply->errorString();
         reply->deleteLater();
-        return;
-    }
 
-    const QJsonObject payload = QJsonDocument::fromJson(reply->readAll()).object();
-    const QString token = payload.value(QStringLiteral("access_token")).toString().trimmed();
-    reply->deleteLater();
+        if (error != QNetworkReply::NoError) {
+            appendChatSystemMessage(tr("OAuth token exchange failed: %1").arg(errorString));
+            return;
+        }
 
-    if (token.isEmpty()) {
-        appendChatSystemMessage(tr("OAuth token exchange did not return an access token."));
-        return;
-    }
+        const QJsonObject payload = QJsonDocument::fromJson(payloadBytes).object();
+        const QString token = payload.value(QStringLiteral("access_token")).toString().trimmed();
 
-    tokenEdit_->setText(token);
-    persistOAuthToken(token);
-    appendChatSystemMessage(tr("OAuth token exchange succeeded and token was cached."));
+        if (token.isEmpty()) {
+            appendChatSystemMessage(tr("OAuth token exchange did not return an access token."));
+            return;
+        }
+
+        broadcasterId_.clear();
+        twitchLogin_.clear();
+        validatedToken_.clear();
+        tokenEdit_->setText(token);
+        persistOAuthToken(token);
+        appendChatSystemMessage(tr("OAuth token exchange succeeded and token was cached."));
+    });
 }
 
 void TwitchDockWidget::persistOAuthToken(const QString &token)
@@ -389,37 +416,51 @@ QString TwitchDockWidget::loadCachedOAuthToken() const
     return token;
 }
 
-bool TwitchDockWidget::resolveIdentity(const QString &token)
+void TwitchDockWidget::resolveIdentity(const QString &token, std::function<void(bool)> continuation)
 {
-    if (!broadcasterId_.isEmpty() && !twitchLogin_.isEmpty()) {
-        return true;
+    if (!broadcasterId_.isEmpty() && !twitchLogin_.isEmpty() && validatedToken_ == token) {
+        continuation(true);
+        return;
     }
+
+    broadcasterId_.clear();
+    twitchLogin_.clear();
+    validatedToken_.clear();
 
     QNetworkRequest request(QUrl(QStringLiteral("https://id.twitch.tv/oauth2/validate")));
     request.setRawHeader("Authorization", QByteArray("OAuth ") + token.toUtf8());
 
     QNetworkReply *reply = networkManager_->get(request);
-    QEventLoop loop;
-    connect(reply, &QNetworkReply::finished, &loop, &QEventLoop::quit);
-    loop.exec();
-
-    if (reply->error() != QNetworkReply::NoError) {
-        appendChatSystemMessage(tr("Unable to resolve broadcaster identity: %1").arg(reply->errorString()));
+    connect(reply, &QNetworkReply::finished, this, [this, reply, token, continuation = std::move(continuation)]() mutable {
+        const QByteArray payloadBytes = reply->readAll();
+        const QNetworkReply::NetworkError error = reply->error();
+        const QString errorString = reply->errorString();
         reply->deleteLater();
-        return false;
-    }
 
-    const QJsonObject payload = QJsonDocument::fromJson(reply->readAll()).object();
-    broadcasterId_ = payload.value(QStringLiteral("user_id")).toString().trimmed();
-    twitchLogin_ = payload.value(QStringLiteral("login")).toString().trimmed();
-    reply->deleteLater();
+        if (error != QNetworkReply::NoError) {
+            appendChatSystemMessage(tr("Unable to resolve broadcaster identity: %1").arg(errorString));
+            continuation(false);
+            return;
+        }
 
-    if (broadcasterId_.isEmpty() || twitchLogin_.isEmpty()) {
-        appendChatSystemMessage(tr("OAuth validation response did not include required identity fields."));
-        return false;
-    }
+        const QJsonObject payload = QJsonDocument::fromJson(payloadBytes).object();
+        const QString broadcasterId = payload.value(QStringLiteral("user_id")).toString().trimmed();
+        const QString twitchLogin = payload.value(QStringLiteral("login")).toString().trimmed();
 
-    return true;
+        if (broadcasterId.isEmpty() || twitchLogin.isEmpty()) {
+            broadcasterId_.clear();
+            twitchLogin_.clear();
+            validatedToken_.clear();
+            appendChatSystemMessage(tr("OAuth validation response did not include required identity fields."));
+            continuation(false);
+            return;
+        }
+
+        broadcasterId_ = broadcasterId;
+        twitchLogin_ = twitchLogin;
+        validatedToken_ = token;
+        continuation(true);
+    });
 }
 
 void TwitchDockWidget::updateChannelInfo()
@@ -434,37 +475,42 @@ void TwitchDockWidget::updateChannelInfo()
         return;
     }
 
-    if (!resolveIdentity(token)) {
-        return;
-    }
-
-    QUrl url(QStringLiteral("https://api.twitch.tv/helix/channels"));
-    QUrlQuery query;
-    query.addQueryItem(QStringLiteral("broadcaster_id"), broadcasterId_);
-    url.setQuery(query);
-
-    QNetworkRequest request(url);
-    request.setHeader(QNetworkRequest::ContentTypeHeader, QStringLiteral("application/json"));
-    request.setRawHeader("Authorization", QByteArray("Bearer ") + token.toUtf8());
-    request.setRawHeader("Client-Id", clientId.toUtf8());
-
-    QJsonObject body;
-    if (!title.isEmpty()) {
-        body.insert(QStringLiteral("title"), title);
-    }
-    if (!gameId.isEmpty()) {
-        body.insert(QStringLiteral("game_id"), gameId);
-    }
-
-    QNetworkReply *reply = networkManager_->sendCustomRequest(
-        request, QByteArrayLiteral("PATCH"), QJsonDocument(body).toJson(QJsonDocument::Compact));
-    connect(reply, &QNetworkReply::finished, this, [this, reply]() {
-        if (reply->error() == QNetworkReply::NoError) {
-            appendChatSystemMessage(tr("Twitch Helix channel update succeeded."));
-        } else {
-            appendChatSystemMessage(tr("Twitch Helix channel update failed: %1").arg(reply->errorString()));
+    resolveIdentity(token, [this, token, clientId, title, gameId](bool ok) {
+        if (!ok) {
+            return;
         }
-        reply->deleteLater();
+
+        QUrl url(QStringLiteral("https://api.twitch.tv/helix/channels"));
+        QUrlQuery query;
+        query.addQueryItem(QStringLiteral("broadcaster_id"), broadcasterId_);
+        url.setQuery(query);
+
+        QNetworkRequest request(url);
+        request.setHeader(QNetworkRequest::ContentTypeHeader, QStringLiteral("application/json"));
+        request.setRawHeader("Authorization", QByteArray("Bearer ") + token.toUtf8());
+        request.setRawHeader("Client-Id", clientId.toUtf8());
+
+        QJsonObject body;
+        if (!title.isEmpty()) {
+            body.insert(QStringLiteral("title"), title);
+        }
+        if (!gameId.isEmpty()) {
+            body.insert(QStringLiteral("game_id"), gameId);
+        }
+
+        QNetworkReply *reply = networkManager_->sendCustomRequest(
+            request, QByteArrayLiteral("PATCH"), QJsonDocument(body).toJson(QJsonDocument::Compact));
+        connect(reply, &QNetworkReply::finished, this, [this, reply]() {
+            const QNetworkReply::NetworkError error = reply->error();
+            const QString errorString = reply->errorString();
+            reply->deleteLater();
+
+            if (error == QNetworkReply::NoError) {
+                appendChatSystemMessage(tr("Twitch Helix channel update succeeded."));
+            } else {
+                appendChatSystemMessage(tr("Twitch Helix channel update failed: %1").arg(errorString));
+            }
+        });
     });
 }
 
@@ -476,29 +522,31 @@ void TwitchDockWidget::connectChat()
         return;
     }
 
-    if (!resolveIdentity(token)) {
-        return;
-    }
+    resolveIdentity(token, [this, token](bool ok) {
+        if (!ok) {
+            return;
+        }
 
-    const QString channel = channelEdit_->text().trimmed().isEmpty() ? twitchLogin_ : channelEdit_->text().trimmed();
+        const QString channel = channelEdit_->text().trimmed().isEmpty() ? twitchLogin_ : channelEdit_->text().trimmed();
 
-    if (chatSocket_->state() != QAbstractSocket::UnconnectedState) {
-        chatSocket_->disconnectFromHost();
-    }
+        if (chatSocket_->state() != QAbstractSocket::UnconnectedState) {
+            chatSocket_->abort();
+        }
 
-    chatSocket_->connectToHost(QStringLiteral("irc.chat.twitch.tv"), 6667);
-    if (!chatSocket_->waitForConnected(5000)) {
-        appendChatSystemMessage(tr("Could not connect to Twitch IRC: %1").arg(chatSocket_->errorString()));
-        return;
-    }
+        chatSocket_->connectToHost(QStringLiteral("irc.chat.twitch.tv"), 6667);
+        if (!chatSocket_->waitForConnected(5000)) {
+            appendChatSystemMessage(tr("Could not connect to Twitch IRC: %1").arg(chatSocket_->errorString()));
+            return;
+        }
 
-    // Authenticate and join channel according to Twitch IRC protocol.
-    chatSocket_->write("CAP REQ :twitch.tv/tags twitch.tv/commands\r\n");
-    chatSocket_->write("PASS " + buildIrcPass(token) + "\r\n");
-    chatSocket_->write("NICK " + twitchLogin_.toUtf8() + "\r\n");
-    chatSocket_->write("JOIN #" + channel.toUtf8() + "\r\n");
+        // Authenticate and join channel according to Twitch IRC protocol.
+        chatSocket_->write("CAP REQ :twitch.tv/tags twitch.tv/commands\r\n");
+        chatSocket_->write("PASS " + buildIrcPass(token) + "\r\n");
+        chatSocket_->write("NICK " + twitchLogin_.toUtf8() + "\r\n");
+        chatSocket_->write("JOIN #" + channel.toUtf8() + "\r\n");
 
-    appendChatSystemMessage(tr("Connected to Twitch IRC and joined #%1.").arg(channel));
+        appendChatSystemMessage(tr("Connected to Twitch IRC and joined #%1.").arg(channel));
+    });
 }
 
 void TwitchDockWidget::onChatSocketReadyRead()
