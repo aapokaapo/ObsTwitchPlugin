@@ -942,9 +942,9 @@ void TwitchDockWidget::renderChatMessage(const PendingChatMessage &message)
 {
     chatText_->moveCursor(QTextCursor::End);
     QTextCursor cursor = chatText_->textCursor();
-    cursor.insertHtml(QStringLiteral("<span style='color:#8f8fa3;'>%1</span> <span style='color:%2; font-weight:600;'>%3</span>"
-                                     "<span style='color:#efeff1;'>:</span> ")
+    cursor.insertHtml(QStringLiteral("<span style='color:#8f8fa3;'>%1</span> <span style='color:%2; font-weight:600;'>%3</span>")
                           .arg(message.timestamp, message.color, message.username.toHtmlEscaped()));
+    cursor.insertBlock();
 
     int currentIndex = 0;
     for (const ChatEmoteOccurrence &emote : message.emotes) {
