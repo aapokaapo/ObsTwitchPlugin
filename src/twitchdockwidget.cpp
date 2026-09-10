@@ -73,14 +73,19 @@ QString oauthRedirectUrl()
     return QStringLiteral("http://localhost:%1").arg(kOAuthRedirectPort);
 }
 
-QSet<QString> requiredOAuthScopes()
+const QStringList &requiredOAuthScopes()
 {
-    return {QStringLiteral("channel:manage:broadcast"), QStringLiteral("chat:read"), QStringLiteral("chat:edit")};
+    static const QStringList scopes = {
+        QStringLiteral("channel:manage:broadcast"),
+        QStringLiteral("chat:read"),
+        QStringLiteral("chat:edit"),
+    };
+    return scopes;
 }
 
 QString requiredOAuthScopesText()
 {
-    return QStringLiteral("channel:manage:broadcast chat:read chat:edit");
+    return requiredOAuthScopes().join(QLatin1Char(' '));
 }
 
 bool hasRequiredOAuthScopes(const QSet<QString> &scopes)
@@ -579,8 +584,8 @@ void TwitchDockWidget::ensureOAuthToken()
         return;
     }
 
-    resolveIdentity(token, [this, startAuthorizationFlow](bool ok) {
-        if (ok && hasRequiredOAuthScopes(validatedScopes_)) {
+    resolveIdentity(token, [this, startAuthorizationFlow](bool ok, const QSet<QString> &scopes) {
+        if (ok && hasRequiredOAuthScopes(scopes)) {
             appendChatSystemMessage(tr("OAuth token already present with required scopes; skipping login flow."));
             return;
         }
@@ -588,7 +593,7 @@ void TwitchDockWidget::ensureOAuthToken()
         if (ok) {
             appendChatSystemMessage(
                 tr("OAuth token is missing required scopes (%1). Re-authorize in browser to enable chat responses.")
-                    .arg(missingOAuthScopesText(validatedScopes_)));
+                    .arg(missingOAuthScopesText(scopes)));
         } else {
             appendChatSystemMessage(tr("Existing OAuth token could not be validated. Re-authorizing in browser."));
         }
@@ -1042,10 +1047,10 @@ void TwitchDockWidget::loadPersistedCommands()
     }
 }
 
-void TwitchDockWidget::resolveIdentity(const QString &token, std::function<void(bool)> continuation)
+void TwitchDockWidget::resolveIdentity(const QString &token, std::function<void(bool, const QSet<QString> &)> continuation)
 {
     if (!broadcasterId_.isEmpty() && !twitchLogin_.isEmpty() && validatedToken_ == token) {
-        continuation(true);
+        continuation(true, validatedScopes_);
         return;
     }
 
@@ -1066,7 +1071,7 @@ void TwitchDockWidget::resolveIdentity(const QString &token, std::function<void(
 
         if (error != QNetworkReply::NoError) {
             appendChatSystemMessage(tr("Unable to resolve broadcaster identity: %1").arg(errorString));
-            continuation(false);
+            continuation(false, {});
             return;
         }
 
@@ -1087,7 +1092,7 @@ void TwitchDockWidget::resolveIdentity(const QString &token, std::function<void(
             validatedToken_.clear();
             validatedScopes_.clear();
             appendChatSystemMessage(tr("OAuth validation response did not include required identity fields."));
-            continuation(false);
+            continuation(false, {});
             return;
         }
 
@@ -1095,7 +1100,7 @@ void TwitchDockWidget::resolveIdentity(const QString &token, std::function<void(
         twitchLogin_ = twitchLogin;
         validatedToken_ = token;
         validatedScopes_ = scopes;
-        continuation(true);
+        continuation(true, scopes);
     });
 }
 
@@ -1115,7 +1120,7 @@ void TwitchDockWidget::updateChannelInfo()
         return;
     }
 
-    resolveIdentity(token, [this, token, clientId, title, categoryName](bool ok) {
+    resolveIdentity(token, [this, token, clientId, title, categoryName](bool ok, const QSet<QString> &) {
         if (!ok) {
             return;
         }
@@ -1169,18 +1174,17 @@ void TwitchDockWidget::connectChat()
         return;
     }
 
-    resolveIdentity(token, [this, token](bool ok) {
+    resolveIdentity(token, [this, token](bool ok, const QSet<QString> &scopes) {
         if (!ok) {
             return;
         }
 
-        if (!validatedScopes_.contains(QStringLiteral("chat:read"))) {
+        if (!scopes.contains(QStringLiteral("chat:read"))) {
             appendChatSystemMessage(tr("OAuth token is missing chat:read scope. Click Authorize in Browser to reconnect chat."));
             return;
         }
-        if (!validatedScopes_.contains(QStringLiteral("chat:edit"))) {
-            appendChatSystemMessage(tr("OAuth token is missing chat:edit scope. Click Authorize in Browser to reconnect chat and enable command responses."));
-            return;
+        if (!scopes.contains(QStringLiteral("chat:edit"))) {
+            appendChatSystemMessage(tr("OAuth token is missing chat:edit scope, so command responses cannot be sent until you re-authorize."));
         }
 
         const QString configuredChannel = sanitizeChannelLogin(channelEdit_->text());
@@ -1559,7 +1563,7 @@ void TwitchDockWidget::fetchCurrentChannelInfo()
         return;
     }
 
-    resolveIdentity(token, [this, token, clientId](bool ok) {
+    resolveIdentity(token, [this, token, clientId](bool ok, const QSet<QString> &) {
         if (!ok) {
             return;
         }

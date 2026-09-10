@@ -123,7 +123,7 @@ private:
     void persistOAuthToken(const QString &token);
     QString loadCachedOAuthToken() const;
 
-    void resolveIdentity(const QString &token, std::function<void(bool)> continuation);
+    void resolveIdentity(const QString &token, std::function<void(bool, const QSet<QString> &)> continuation);
     QByteArray buildIrcPass(const QString &oauthToken) const;
 
     QTabWidget *tabs_ = nullptr;
