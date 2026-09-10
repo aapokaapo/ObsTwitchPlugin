@@ -94,27 +94,6 @@ QString requiredOAuthScopesText()
     return requiredOAuthScopes().join(QLatin1Char(' '));
 }
 
-bool hasRequiredOAuthScopes(const QSet<QString> &scopes)
-{
-    for (const QString &scope : requiredOAuthScopes()) {
-        if (!scopes.contains(scope)) {
-            return false;
-        }
-    }
-    return true;
-}
-
-QString missingOAuthScopesText(const QSet<QString> &scopes)
-{
-    QStringList missingScopes;
-    for (const QString &scope : requiredOAuthScopes()) {
-        if (!scopes.contains(scope)) {
-            missingScopes.append(scope);
-        }
-    }
-    return missingScopes.join(QStringLiteral(", "));
-}
-
 QString firstNonEmpty(obs_data_t *settings, const std::initializer_list<const char *> &keys)
 {
     for (const char *key : keys) {
@@ -589,6 +568,10 @@ void TwitchDockWidget::ensureOAuthToken()
                 .arg(oauthRedirectUrl()));
         return;
     }
+    if (clientSecret.isEmpty()) {
+        appendChatSystemMessage(tr("Provide Twitch Client Secret before starting OAuth."));
+        return;
+    }
     persistClientId(clientId);
     persistClientSecret(clientSecret);
 
@@ -611,29 +594,7 @@ void TwitchDockWidget::ensureOAuthToken()
         appendChatSystemMessage(tr("Opening Twitch OAuth authorization page..."));
         QDesktopServices::openUrl(url);
     };
-
-    const QString token = tokenEdit_->text().trimmed();
-    if (token.isEmpty()) {
-        startAuthorizationFlow();
-        return;
-    }
-
-    resolveIdentity(token, [this, startAuthorizationFlow](bool ok, const QSet<QString> &scopes) {
-        if (ok && hasRequiredOAuthScopes(scopes)) {
-            appendChatSystemMessage(tr("OAuth token already present with required scopes; skipping login flow."));
-            return;
-        }
-
-        if (ok) {
-            appendChatSystemMessage(
-                tr("OAuth token is missing required scopes (%1). Re-authorize in browser to enable chat responses.")
-                    .arg(missingOAuthScopesText(scopes)));
-        } else {
-            appendChatSystemMessage(tr("Existing OAuth token could not be validated. Re-authorizing in browser."));
-        }
-
-        startAuthorizationFlow();
-    });
+    startAuthorizationFlow();
 }
 
 void TwitchDockWidget::startOAuthServer()
