@@ -1306,7 +1306,7 @@ void TwitchDockWidget::flushPendingChatMessages()
 
         renderChatMessage(message);
         if (!message.commandResponse.isEmpty()) {
-            appendCommandResponse(message.commandResponse);
+            appendCommandResponse(message.timestamp, message.commandResponse);
         }
         pendingChatMessages_.removeFirst();
     }
@@ -1359,7 +1359,7 @@ void TwitchDockWidget::renderChatMessage(const PendingChatMessage &message)
     chatText_->setTextCursor(cursor);
 }
 
-void TwitchDockWidget::appendCommandResponse(const QString &response)
+void TwitchDockWidget::appendCommandResponse(const QString &timestamp, const QString &response)
 {
     QString escapedResponse = response.toHtmlEscaped();
     escapedResponse.replace(QLatin1Char('\n'), QStringLiteral("<br/>"));
@@ -1369,7 +1369,7 @@ void TwitchDockWidget::appendCommandResponse(const QString &response)
     ensureChatEntryStartsOnNewLine(cursor);
     cursor.insertHtml(QStringLiteral("<span style='color:#8f8fa3;'>%1</span> <span style='color:#53fc18;'>[command]</span> "
                                      "<span style='color:#efeff1;'>%2</span>")
-                          .arg(QTime::currentTime().toString(QStringLiteral("HH:mm")), escapedResponse));
+                          .arg(timestamp.toHtmlEscaped(), escapedResponse));
     cursor.insertBlock();
     chatText_->setTextCursor(cursor);
 }

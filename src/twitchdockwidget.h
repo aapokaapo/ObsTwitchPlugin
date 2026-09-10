@@ -86,7 +86,7 @@ private:
     void persistCommands() const;
     void loadPersistedCommands();
     void appendChatSystemMessage(const QString &message);
-    void appendCommandResponse(const QString &response);
+    void appendCommandResponse(const QString &timestamp, const QString &response);
     void appendFormattedChatLine(const QByteArray &ircLine);
     QString commandResponseForMessage(const QString &message) const;
     QList<ChatEmoteOccurrence> parseIrcEmotes(const QString &emotesTag) const;
