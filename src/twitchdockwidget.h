@@ -160,5 +160,6 @@ private:
     QSet<QString> pendingEmoteIds_;
     QSet<QString> unavailableEmoteIds_;
     QList<PendingChatMessage> pendingChatMessages_;
+    bool chatCanSendMessages_ = false;
     bool chatAutoConnectAttempted_ = false;
 };

@@ -1169,6 +1169,7 @@ void TwitchDockWidget::updateChannelInfo()
 void TwitchDockWidget::connectChat()
 {
     const QString token = tokenEdit_->text().trimmed();
+    chatCanSendMessages_ = false;
     if (token.isEmpty()) {
         appendChatSystemMessage(tr("Chat connection requires an OAuth token with chat:read scope and chat:edit for command responses."));
         return;
@@ -1183,6 +1184,7 @@ void TwitchDockWidget::connectChat()
             appendChatSystemMessage(tr("OAuth token is missing chat:read scope. Click Authorize in Browser to reconnect chat."));
             return;
         }
+        chatCanSendMessages_ = scopes.contains(QStringLiteral("chat:edit"));
         if (!scopes.contains(QStringLiteral("chat:edit"))) {
             appendChatSystemMessage(tr("OAuth token is missing chat:edit scope, so command responses cannot be sent until you re-authorize."));
         }
@@ -1459,14 +1461,7 @@ bool TwitchDockWidget::sendChatMessage(const QString &message)
         return false;
     }
 
-    const QString token = tokenEdit_->text().trimmed();
-    const bool hasValidatedCurrentToken = !token.isEmpty() && validatedToken_ == token;
-    if (!hasValidatedCurrentToken) {
-        appendChatSystemMessage(
-            tr("Cannot send command response: reconnect chat or re-authorize so the current OAuth token can be validated."));
-        return false;
-    }
-    if (!validatedScopes_.contains(QStringLiteral("chat:edit"))) {
+    if (!chatCanSendMessages_) {
         appendChatSystemMessage(tr("Cannot send command response: OAuth token is missing chat:edit scope."));
         return false;
     }
