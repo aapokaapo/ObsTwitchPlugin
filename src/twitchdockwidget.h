@@ -123,7 +123,7 @@ private:
     void persistOAuthToken(const QString &token);
     QString loadCachedOAuthToken() const;
 
-    void resolveIdentity(const QString &token, std::function<void(bool)> continuation);
+    void resolveIdentity(const QString &token, std::function<void(bool, const QSet<QString> &)> continuation);
     QByteArray buildIrcPass(const QString &oauthToken) const;
 
     QTabWidget *tabs_ = nullptr;
@@ -154,10 +154,12 @@ private:
     QString broadcasterId_;
     QString twitchLogin_;
     QString validatedToken_;
+    QSet<QString> validatedScopes_;
     QHash<QString, QImage> emoteImages_;
     QMap<QString, QString> customCommands_;
     QSet<QString> pendingEmoteIds_;
     QSet<QString> unavailableEmoteIds_;
     QList<PendingChatMessage> pendingChatMessages_;
+    bool chatCanSendMessages_ = false;
     bool chatAutoConnectAttempted_ = false;
 };
