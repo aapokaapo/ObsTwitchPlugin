@@ -36,6 +36,7 @@ private slots:
     void updateChannelInfo();
 
     void connectChat();
+    void sendManualMessage();
     void onChatSocketReadyRead();
 
     void addCommand();
@@ -86,7 +87,7 @@ private:
     void persistCommands() const;
     void loadPersistedCommands();
     void appendChatSystemMessage(const QString &message);
-    void appendCommandResponse(const QString &timestamp, const QString &response);
+    void appendLocalOutgoingChatMessage(const QString &message);
     bool sendChatMessage(const QString &message);
     void appendFormattedChatLine(const QByteArray &ircLine);
     QString commandResponseForMessage(const QString &message) const;
@@ -130,6 +131,7 @@ private:
 
     QTextEdit *chatText_ = nullptr;
     QLineEdit *channelEdit_ = nullptr;
+    QLineEdit *messageEdit_ = nullptr;
 
     QLineEdit *titleEdit_ = nullptr;
     QLineEdit *gameIdEdit_ = nullptr;
@@ -160,6 +162,7 @@ private:
     QSet<QString> pendingEmoteIds_;
     QSet<QString> unavailableEmoteIds_;
     QList<PendingChatMessage> pendingChatMessages_;
+    QStringList pendingLocalChatEchoes_;
     bool chatCanSendMessages_ = false;
     bool chatAutoConnectAttempted_ = false;
 };

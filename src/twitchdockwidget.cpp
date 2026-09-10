@@ -281,10 +281,20 @@ void TwitchDockWidget::buildUi()
     chatRow->addWidget(channelEdit_);
     chatRow->addWidget(chatConnectButton);
 
-    connect(chatConnectButton, &QPushButton::clicked, this, &TwitchDockWidget::connectChat);
+    auto *messageRow = new QHBoxLayout();
+    messageEdit_ = new QLineEdit(chatTab);
+    messageEdit_->setPlaceholderText(tr("Type a chat message"));
+    auto *sendMessageButton = new QPushButton(tr("Send"), chatTab);
+    messageRow->addWidget(messageEdit_);
+    messageRow->addWidget(sendMessageButton);
 
-    chatLayout->addWidget(chatText_);
+    connect(chatConnectButton, &QPushButton::clicked, this, &TwitchDockWidget::connectChat);
+    connect(sendMessageButton, &QPushButton::clicked, this, &TwitchDockWidget::sendManualMessage);
+    connect(messageEdit_, &QLineEdit::returnPressed, this, &TwitchDockWidget::sendManualMessage);
+
     chatLayout->addLayout(chatRow);
+    chatLayout->addWidget(chatText_);
+    chatLayout->addLayout(messageRow);
     tabs_->addTab(chatTab, tr("Chat"));
 
     // Stream tab: title/category updates plus OAuth acquisition fields.
@@ -1214,6 +1224,18 @@ void TwitchDockWidget::connectChat()
     });
 }
 
+void TwitchDockWidget::sendManualMessage()
+{
+    if (!messageEdit_) {
+        return;
+    }
+
+    const QString message = messageEdit_->text();
+    if (sendChatMessage(message)) {
+        messageEdit_->clear();
+    }
+}
+
 void TwitchDockWidget::onChatSocketReadyRead()
 {
     // Append every inbound IRC line and respond to keepalive PING frames.
@@ -1254,6 +1276,13 @@ void TwitchDockWidget::appendFormattedChatLine(const QByteArray &ircLine)
         const QString username = displayName.isEmpty() ? QStringLiteral("user") : displayName;
         const QString color = sanitizeChatColor(ircTagValue(tags, QStringLiteral("color")));
         const bool isOwnMessage = !twitchLogin_.isEmpty() && senderLogin.compare(twitchLogin_, Qt::CaseInsensitive) == 0;
+        if (isOwnMessage) {
+            const int echoedMessageIndex = pendingLocalChatEchoes_.indexOf(message);
+            if (echoedMessageIndex >= 0) {
+                pendingLocalChatEchoes_.removeAt(echoedMessageIndex);
+                return;
+            }
+        }
         const QString commandResponse = isOwnMessage ? QString() : commandResponseForMessage(message);
         enqueueChatMessage(timestamp,
                            username,
@@ -1385,8 +1414,8 @@ void TwitchDockWidget::flushPendingChatMessages()
         }
 
         renderChatMessage(message);
-        if (!message.commandResponse.isEmpty() && sendChatMessage(message.commandResponse)) {
-            appendCommandResponse(message.timestamp, message.commandResponse);
+        if (!message.commandResponse.isEmpty()) {
+            sendChatMessage(message.commandResponse);
         }
         pendingChatMessages_.removeFirst();
     }
@@ -1439,17 +1468,26 @@ void TwitchDockWidget::renderChatMessage(const PendingChatMessage &message)
     chatText_->setTextCursor(cursor);
 }
 
-void TwitchDockWidget::appendCommandResponse(const QString &timestamp, const QString &response)
+void TwitchDockWidget::appendLocalOutgoingChatMessage(const QString &message)
 {
-    QString escapedResponse = response.toHtmlEscaped();
-    escapedResponse.replace(QLatin1Char('\n'), QStringLiteral("<br/>"));
+    const QString trimmedMessage = message.trimmed();
+    if (trimmedMessage.isEmpty()) {
+        return;
+    }
 
+    pendingLocalChatEchoes_.append(trimmedMessage);
     chatText_->moveCursor(QTextCursor::End);
     QTextCursor cursor = chatText_->textCursor();
     ensureChatEntryStartsOnNewLine(cursor);
-    cursor.insertHtml(QStringLiteral("<span style='color:#8f8fa3;'>%1</span> <span style='color:#53fc18;'>[command]</span> "
-                                     "<span style='color:#efeff1;'>%2</span>")
-                          .arg(timestamp.toHtmlEscaped(), escapedResponse));
+    cursor.insertHtml(QStringLiteral("<span style='color:#8f8fa3;'>%1</span> <span style='color:%2;'>%3</span>"
+                                     "<span style='color:#efeff1;'>: </span>")
+                          .arg(QTime::currentTime().toString(QStringLiteral("HH:mm")).toHtmlEscaped(),
+                               QString::fromLatin1(kDefaultChatColor),
+                               (twitchLogin_.isEmpty() ? tr("You") : twitchLogin_).toHtmlEscaped()));
+    QTextCharFormat messageFormat = cursor.charFormat();
+    messageFormat.setForeground(QColor(QString::fromLatin1(kChatMessageTextColor)));
+    cursor.setCharFormat(messageFormat);
+    cursor.insertText(trimmedMessage);
     cursor.insertBlock();
     chatText_->setTextCursor(cursor);
 }
@@ -1457,18 +1495,18 @@ void TwitchDockWidget::appendCommandResponse(const QString &timestamp, const QSt
 bool TwitchDockWidget::sendChatMessage(const QString &message)
 {
     if (chatSocket_->state() != QAbstractSocket::ConnectedState) {
-        appendChatSystemMessage(tr("Cannot send command response: chat is not connected."));
+        appendChatSystemMessage(tr("Cannot send chat message: chat is not connected."));
         return false;
     }
 
     if (!chatCanSendMessages_) {
-        appendChatSystemMessage(tr("Cannot send command response: OAuth token is missing chat:edit scope."));
+        appendChatSystemMessage(tr("Cannot send chat message: OAuth token is missing chat:edit scope."));
         return false;
     }
 
     const QString channel = sanitizeChannelLogin(channelEdit_->text());
     if (channel.isEmpty()) {
-        appendChatSystemMessage(tr("Cannot send command response: channel is not configured."));
+        appendChatSystemMessage(tr("Cannot send chat message: channel is not configured."));
         return false;
     }
 
@@ -1483,10 +1521,11 @@ bool TwitchDockWidget::sendChatMessage(const QString &message)
     const qint64 written =
         chatSocket_->write("PRIVMSG #" + channel.toUtf8() + " :" + outbound.toUtf8() + "\r\n");
     if (written < 0) {
-        appendChatSystemMessage(tr("Failed to send command response: %1").arg(chatSocket_->errorString()));
+        appendChatSystemMessage(tr("Failed to send chat message: %1").arg(chatSocket_->errorString()));
         return false;
     }
 
+    appendLocalOutgoingChatMessage(outbound);
     return true;
 }
 
