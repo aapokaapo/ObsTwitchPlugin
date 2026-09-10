@@ -1459,7 +1459,9 @@ bool TwitchDockWidget::sendChatMessage(const QString &message)
         return false;
     }
 
-    if (!validatedScopes_.contains(QStringLiteral("chat:edit"))) {
+    const QString token = tokenEdit_->text().trimmed();
+    const bool hasValidatedCurrentToken = !token.isEmpty() && validatedToken_ == token;
+    if (hasValidatedCurrentToken && !validatedScopes_.contains(QStringLiteral("chat:edit"))) {
         appendChatSystemMessage(tr("Cannot send command response: OAuth token is missing chat:edit scope."));
         return false;
     }
