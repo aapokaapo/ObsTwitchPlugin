@@ -139,7 +139,7 @@ public:
         auto *formLayout = new QFormLayout();
 
         triggerEdit_ = new QLineEdit(this);
-        triggerEdit_->setPlaceholderText(tr("!command"));
+        triggerEdit_->setPlaceholderText(tr("command"));
         triggerEdit_->setText(initialTrigger);
 
         responseEdit_ = new QTextEdit(this);
@@ -155,10 +155,6 @@ public:
         connect(buttons, &QDialogButtonBox::accepted, this, [this]() {
             if (trigger().isEmpty()) {
                 QMessageBox::warning(this, tr("Invalid Command"), tr("Command trigger cannot be empty."));
-                return;
-            }
-            if (!trigger().startsWith(QLatin1Char('!'))) {
-                QMessageBox::warning(this, tr("Invalid Command"), tr("Command trigger must start with !."));
                 return;
             }
             if (response().isEmpty()) {
@@ -975,7 +971,7 @@ void TwitchDockWidget::loadPersistedCommands()
         settings.setArrayIndex(index);
         const QString trigger = settings.value(kCommandTriggerSettingsKey).toString().trimmed();
         const QString response = settings.value(kCommandResponseSettingsKey).toString();
-        if (!trigger.isEmpty() && trigger.startsWith(QLatin1Char('!')) && !response.isEmpty()) {
+        if (!trigger.isEmpty() && !response.isEmpty()) {
             customCommands_.insert(trigger, response);
         }
     }
