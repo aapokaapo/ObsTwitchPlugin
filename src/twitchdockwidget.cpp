@@ -1,5 +1,6 @@
 #include "twitchdockwidget.h"
 
+#include <QDateTime>
 #include <QDesktopServices>
 #include <QDir>
 #include <QFile>
@@ -60,6 +61,7 @@ constexpr quint16 kOAuthRedirectPort = 38471;
 constexpr auto kDefaultChatColor = "#bf94ff";
 constexpr auto kChatMessageTextColor = "#efeff1";
 constexpr int kCategorySuggestionLimit = 20;
+constexpr qint64 kPendingChatMessageEmoteTimeoutMs = 5000;
 
 void ensureChatEntryStartsOnNewLine(QTextCursor &cursor)
 {
@@ -1283,7 +1285,7 @@ void TwitchDockWidget::appendFormattedChatLine(const QByteArray &ircLine)
                 return;
             }
         }
-        const QString commandResponse = isOwnMessage ? QString() : commandResponseForMessage(message);
+        const QString commandResponse = commandResponseForMessage(message);
         enqueueChatMessage(timestamp,
                            username,
                            color,
@@ -1320,12 +1322,12 @@ void TwitchDockWidget::appendFormattedChatLine(const QByteArray &ircLine)
 
 QString TwitchDockWidget::commandResponseForMessage(const QString &message) const
 {
-    const QString trigger = message.trimmed();
-    if (trigger.isEmpty()) {
+    const QStringList words = message.trimmed().split(QLatin1Char(' '), Qt::SkipEmptyParts);
+    if (words.isEmpty()) {
         return {};
     }
 
-    return customCommands_.value(trigger);
+    return customCommands_.value(words.first());
 }
 
 QList<TwitchDockWidget::ChatEmoteOccurrence> TwitchDockWidget::parseIrcEmotes(const QString &emotesTag) const
@@ -1385,6 +1387,7 @@ void TwitchDockWidget::enqueueChatMessage(const QString &timestamp,
     pendingMessage.message = message;
     pendingMessage.commandResponse = commandResponse;
     pendingMessage.emotes = emotes;
+    pendingMessage.enqueuedAtMs = QDateTime::currentMSecsSinceEpoch();
 
     for (const ChatEmoteOccurrence &emote : emotes) {
         pendingMessage.requiredEmoteIds.insert(emote.id);
@@ -1399,6 +1402,7 @@ void TwitchDockWidget::enqueueChatMessage(const QString &timestamp,
 
 void TwitchDockWidget::flushPendingChatMessages()
 {
+    const qint64 now = QDateTime::currentMSecsSinceEpoch();
     while (!pendingChatMessages_.isEmpty()) {
         const PendingChatMessage &message = pendingChatMessages_.front();
         bool ready = true;
@@ -1409,7 +1413,8 @@ void TwitchDockWidget::flushPendingChatMessages()
             }
         }
 
-        if (!ready) {
+        const bool waitTimedOut = message.enqueuedAtMs > 0 && now - message.enqueuedAtMs >= kPendingChatMessageEmoteTimeoutMs;
+        if (!ready && !waitTimedOut) {
             return;
         }
 

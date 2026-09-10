@@ -70,6 +70,7 @@ private:
         QString commandResponse;
         QList<ChatEmoteOccurrence> emotes;
         QSet<QString> requiredEmoteIds;
+        qint64 enqueuedAtMs = 0;
     };
 
     void buildUi();
