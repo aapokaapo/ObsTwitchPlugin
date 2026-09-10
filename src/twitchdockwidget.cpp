@@ -38,6 +38,7 @@
 #include <QVBoxLayout>
 
 #include <algorithm>
+#include <optional>
 
 extern "C" {
 #if __has_include(<obs/obs-frontend-api.h>)
@@ -62,6 +63,7 @@ constexpr auto kDefaultChatColor = "#bf94ff";
 constexpr auto kChatMessageTextColor = "#efeff1";
 constexpr int kCategorySuggestionLimit = 20;
 constexpr qint64 kPendingEmoteWaitTimeoutMs = 5000;
+constexpr int kMaxCommandChainDepth = 16;
 
 void ensureChatEntryStartsOnNewLine(QTextCursor &cursor)
 {
@@ -1278,20 +1280,37 @@ void TwitchDockWidget::appendFormattedChatLine(const QByteArray &ircLine)
         const QString username = displayName.isEmpty() ? QStringLiteral("user") : displayName;
         const QString color = sanitizeChatColor(ircTagValue(tags, QStringLiteral("color")));
         const bool isOwnMessage = !twitchLogin_.isEmpty() && senderLogin.compare(twitchLogin_, Qt::CaseInsensitive) == 0;
+        std::optional<int> localEchoCommandDepth;
         if (isOwnMessage) {
-            const int echoedMessageIndex = pendingLocalChatEchoes_.indexOf(message);
-            if (echoedMessageIndex >= 0) {
-                pendingLocalChatEchoes_.removeAt(echoedMessageIndex);
-                return;
+            const QString trimmedMessage = message.trimmed();
+            const auto echoedMessageIt = std::find_if(
+                pendingLocalChatEchoes_.begin(), pendingLocalChatEchoes_.end(),
+                [&trimmedMessage](const LocalChatEcho &echo) { return echo.message == trimmedMessage; });
+            if (echoedMessageIt != pendingLocalChatEchoes_.end()) {
+                localEchoCommandDepth = echoedMessageIt->commandDepth;
+                pendingLocalChatEchoes_.erase(echoedMessageIt);
             }
         }
         const QString commandResponse = commandResponseForMessage(message);
+        if (localEchoCommandDepth.has_value()) {
+            if (commandResponse.isEmpty()) {
+                return;
+            }
+            if (*localEchoCommandDepth >= kMaxCommandChainDepth) {
+                appendChatSystemMessage(
+                    tr("Skipping nested command response because the command chain limit was reached."));
+                return;
+            }
+            sendChatMessage(commandResponse, *localEchoCommandDepth + 1);
+            return;
+        }
         enqueueChatMessage(timestamp,
                            username,
                            color,
                            message,
                            parseIrcEmotes(ircTagValue(tags, QStringLiteral("emotes"))),
-                           commandResponse);
+                           commandResponse,
+                           0);
         return;
     }
 
@@ -1378,7 +1397,8 @@ void TwitchDockWidget::enqueueChatMessage(const QString &timestamp,
                                           const QString &color,
                                           const QString &message,
                                           const QList<ChatEmoteOccurrence> &emotes,
-                                          const QString &commandResponse)
+                                          const QString &commandResponse,
+                                          int commandDepth)
 {
     PendingChatMessage pendingMessage;
     pendingMessage.timestamp = timestamp;
@@ -1387,6 +1407,7 @@ void TwitchDockWidget::enqueueChatMessage(const QString &timestamp,
     pendingMessage.message = message;
     pendingMessage.commandResponse = commandResponse;
     pendingMessage.emotes = emotes;
+    pendingMessage.commandDepth = commandDepth;
     pendingMessage.enqueuedAtMs = QDateTime::currentMSecsSinceEpoch();
 
     for (const ChatEmoteOccurrence &emote : emotes) {
@@ -1421,7 +1442,12 @@ void TwitchDockWidget::flushPendingChatMessages()
 
         renderChatMessage(message);
         if (!message.commandResponse.isEmpty()) {
-            sendChatMessage(message.commandResponse);
+            if (message.commandDepth >= kMaxCommandChainDepth) {
+                appendChatSystemMessage(
+                    tr("Skipping nested command response because the command chain limit was reached."));
+            } else {
+                sendChatMessage(message.commandResponse, message.commandDepth + 1);
+            }
         }
         pendingChatMessages_.removeFirst();
     }
@@ -1474,14 +1500,14 @@ void TwitchDockWidget::renderChatMessage(const PendingChatMessage &message)
     chatText_->setTextCursor(cursor);
 }
 
-void TwitchDockWidget::appendLocalOutgoingChatMessage(const QString &message)
+void TwitchDockWidget::appendLocalOutgoingChatMessage(const QString &message, int commandDepth)
 {
     const QString trimmedMessage = message.trimmed();
     if (trimmedMessage.isEmpty()) {
         return;
     }
 
-    pendingLocalChatEchoes_.append(trimmedMessage);
+    pendingLocalChatEchoes_.append({trimmedMessage, commandDepth});
     while (pendingLocalChatEchoes_.size() > 50) {
         pendingLocalChatEchoes_.removeFirst();
     }
@@ -1501,7 +1527,7 @@ void TwitchDockWidget::appendLocalOutgoingChatMessage(const QString &message)
     chatText_->setTextCursor(cursor);
 }
 
-bool TwitchDockWidget::sendChatMessage(const QString &message)
+bool TwitchDockWidget::sendChatMessage(const QString &message, int commandDepth)
 {
     if (chatSocket_->state() != QAbstractSocket::ConnectedState) {
         appendChatSystemMessage(tr("Cannot send chat message: chat is not connected."));
@@ -1534,7 +1560,7 @@ bool TwitchDockWidget::sendChatMessage(const QString &message)
         return false;
     }
 
-    appendLocalOutgoingChatMessage(outbound);
+    appendLocalOutgoingChatMessage(outbound, commandDepth);
     return true;
 }
 

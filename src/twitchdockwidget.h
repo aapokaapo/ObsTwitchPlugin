@@ -70,7 +70,13 @@ private:
         QString commandResponse;
         QList<ChatEmoteOccurrence> emotes;
         QSet<QString> requiredEmoteIds;
+        int commandDepth = 0;
         qint64 enqueuedAtMs = 0;
+    };
+
+    struct LocalChatEcho {
+        QString message;
+        int commandDepth = 0;
     };
 
     void buildUi();
@@ -89,8 +95,8 @@ private:
     void persistCommands() const;
     void loadPersistedCommands();
     void appendChatSystemMessage(const QString &message);
-    void appendLocalOutgoingChatMessage(const QString &message);
-    bool sendChatMessage(const QString &message);
+    void appendLocalOutgoingChatMessage(const QString &message, int commandDepth);
+    bool sendChatMessage(const QString &message, int commandDepth = 0);
     void appendFormattedChatLine(const QByteArray &ircLine);
     QString commandResponseForMessage(const QString &message) const;
     QList<ChatEmoteOccurrence> parseIrcEmotes(const QString &emotesTag) const;
@@ -99,7 +105,8 @@ private:
                             const QString &color,
                             const QString &message,
                             const QList<ChatEmoteOccurrence> &emotes,
-                            const QString &commandResponse = {});
+                            const QString &commandResponse = {},
+                            int commandDepth = 0);
     void flushPendingChatMessages();
     void renderChatMessage(const PendingChatMessage &message);
     void requestEmoteImage(const QString &emoteId);
@@ -164,7 +171,7 @@ private:
     QSet<QString> pendingEmoteIds_;
     QSet<QString> unavailableEmoteIds_;
     QList<PendingChatMessage> pendingChatMessages_;
-    QStringList pendingLocalChatEchoes_;
+    QList<LocalChatEcho> pendingLocalChatEchoes_;
     bool chatCanSendMessages_ = false;
     bool chatAutoConnectAttempted_ = false;
 };
