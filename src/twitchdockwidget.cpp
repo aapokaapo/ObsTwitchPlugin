@@ -261,7 +261,7 @@ void TwitchDockWidget::buildUi()
     auto *layout = new QVBoxLayout(this);
     tabs_ = new QTabWidget(this);
 
-    // Chat tab: a stylized text timeline plus one-click IRC join.
+    // Chat tab: channel controls, a stylized timeline, and outbound chat sending.
     auto *chatTab = new QWidget(this);
     auto *chatLayout = new QVBoxLayout(chatTab);
     chatText_ = new QTextEdit(chatTab);
@@ -1476,6 +1476,9 @@ void TwitchDockWidget::appendLocalOutgoingChatMessage(const QString &message)
     }
 
     pendingLocalChatEchoes_.append(trimmedMessage);
+    while (pendingLocalChatEchoes_.size() > 50) {
+        pendingLocalChatEchoes_.removeFirst();
+    }
     chatText_->moveCursor(QTextCursor::End);
     QTextCursor cursor = chatText_->textCursor();
     ensureChatEntryStartsOnNewLine(cursor);

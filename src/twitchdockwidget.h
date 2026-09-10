@@ -13,6 +13,7 @@
 #include <QPushButton>
 #include <QCompleter>
 #include <QSet>
+#include <QStringList>
 #include <QStringListModel>
 #include <QTableWidget>
 #include <QTcpServer>
