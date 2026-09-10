@@ -14,6 +14,7 @@
 #include <QNetworkReply>
 #include <QNetworkRequest>
 #include <QColor>
+#include <QDateTime>
 #include <QDialog>
 #include <QDialogButtonBox>
 #include <QFormLayout>
@@ -60,6 +61,7 @@ constexpr quint16 kOAuthRedirectPort = 38471;
 constexpr auto kDefaultChatColor = "#bf94ff";
 constexpr auto kChatMessageTextColor = "#efeff1";
 constexpr int kCategorySuggestionLimit = 20;
+constexpr qint64 kPendingEmoteWaitTimeoutMs = 5000;
 
 void ensureChatEntryStartsOnNewLine(QTextCursor &cursor)
 {
@@ -1283,7 +1285,7 @@ void TwitchDockWidget::appendFormattedChatLine(const QByteArray &ircLine)
                 return;
             }
         }
-        const QString commandResponse = isOwnMessage ? QString() : commandResponseForMessage(message);
+        const QString commandResponse = commandResponseForMessage(message);
         enqueueChatMessage(timestamp,
                            username,
                            color,
@@ -1385,6 +1387,7 @@ void TwitchDockWidget::enqueueChatMessage(const QString &timestamp,
     pendingMessage.message = message;
     pendingMessage.commandResponse = commandResponse;
     pendingMessage.emotes = emotes;
+    pendingMessage.enqueuedAtMs = QDateTime::currentMSecsSinceEpoch();
 
     for (const ChatEmoteOccurrence &emote : emotes) {
         pendingMessage.requiredEmoteIds.insert(emote.id);
@@ -1410,7 +1413,10 @@ void TwitchDockWidget::flushPendingChatMessages()
         }
 
         if (!ready) {
-            return;
+            const qint64 waitMs = QDateTime::currentMSecsSinceEpoch() - message.enqueuedAtMs;
+            if (waitMs < kPendingEmoteWaitTimeoutMs) {
+                return;
+            }
         }
 
         renderChatMessage(message);
