@@ -751,9 +751,9 @@ bool TwitchDockWidget::showCommandDialog(const QString &windowTitle,
                                          const QString &initialResponse,
                                          QString &trigger,
                                          QString &response,
-                                         QString &errorMessage) const
+                                         QString &errorMessage)
 {
-    CommandDialog dialog(windowTitle, initialTrigger, initialResponse, const_cast<TwitchDockWidget *>(this));
+    CommandDialog dialog(windowTitle, initialTrigger, initialResponse, this);
     if (dialog.exec() != QDialog::Accepted) {
         return false;
     }
@@ -779,6 +779,7 @@ void TwitchDockWidget::refreshCommandsTable()
         return;
     }
 
+    commandsTable_->clearContents();
     commandsTable_->setRowCount(customCommands_.size());
 
     int row = 0;
@@ -810,6 +811,7 @@ void TwitchDockWidget::refreshCommandsTable()
         actionsLayout->addStretch();
         commandsTable_->setCellWidget(row, 2, actionsWidget);
     }
+    commandsTable_->resizeRowsToContents();
 }
 
 void TwitchDockWidget::addCommand()
