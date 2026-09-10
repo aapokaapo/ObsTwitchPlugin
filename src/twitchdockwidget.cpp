@@ -49,6 +49,7 @@ extern "C" {
 
 namespace {
 constexpr auto kTokenSettingsGroup = "ObsTwitchPlugin";
+constexpr auto kCommandsSettingsGroup = "ObsTwitchPlugin/Commands";
 constexpr auto kTokenSettingsKey = "twitch_oauth_token";
 constexpr auto kChatChannelSettingsKey = "chat_channel";
 constexpr auto kClientIdSettingsKey = "twitch_client_id";
@@ -876,7 +877,7 @@ void TwitchDockWidget::persistCommands() const
 
     const QString settingsPath = configDir + QStringLiteral("/obstwitchplugin.ini");
     QSettings settings(settingsPath, QSettings::IniFormat);
-    settings.beginGroup(kTokenSettingsGroup);
+    settings.beginGroup(kCommandsSettingsGroup);
     settings.remove(kCommandsArraySettingsKey);
     settings.beginWriteArray(kCommandsArraySettingsKey);
     int index = 0;
@@ -897,7 +898,7 @@ void TwitchDockWidget::loadPersistedCommands()
     const QString configDir = QStandardPaths::writableLocation(QStandardPaths::AppConfigLocation);
     const QString settingsPath = configDir + QStringLiteral("/obstwitchplugin.ini");
     QSettings settings(settingsPath, QSettings::IniFormat);
-    settings.beginGroup(kTokenSettingsGroup);
+    settings.beginGroup(kCommandsSettingsGroup);
     const int size = settings.beginReadArray(kCommandsArraySettingsKey);
     for (int index = 0; index < size; ++index) {
         settings.setArrayIndex(index);
