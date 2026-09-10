@@ -76,7 +76,10 @@ private:
                            const QString &initialResponse,
                            QString &trigger,
                            QString &response);
-    void refreshCommandsTable();
+    int commandRowForTrigger(const QString &trigger) const;
+    void populateCommandRow(int row, const QString &trigger, const QString &response);
+    void editCommandFromButton();
+    void deleteCommandFromButton();
     void editCommand(const QString &existingTrigger);
     void deleteCommand(const QString &trigger);
     void persistCommands() const;
