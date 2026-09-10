@@ -154,6 +154,7 @@ private:
     QString broadcasterId_;
     QString twitchLogin_;
     QString validatedToken_;
+    QSet<QString> validatedScopes_;
     QHash<QString, QImage> emoteImages_;
     QMap<QString, QString> customCommands_;
     QSet<QString> pendingEmoteIds_;
