@@ -1167,20 +1167,23 @@ void TwitchDockWidget::appendFormattedChatLine(const QByteArray &ircLine)
     const QString timestamp = QTime::currentTime().toString(QStringLiteral("HH:mm"));
 
     static const QRegularExpression messagePattern(
-        QStringLiteral("^@([^\\s]+)\\s+:[^\\s]+\\s+PRIVMSG\\s+#[^\\s]+\\s+:(.*)$"));
+        QStringLiteral("^@([^\\s]+)\\s+:([^!\\s]+)![^\\s]+\\s+PRIVMSG\\s+#[^\\s]+\\s+:(.*)$"));
     const QRegularExpressionMatch messageMatch = messagePattern.match(line);
     if (messageMatch.hasMatch()) {
         const QString tags = messageMatch.captured(1);
-        const QString message = messageMatch.captured(2);
+        const QString senderLogin = messageMatch.captured(2);
+        const QString message = messageMatch.captured(3);
         const QString displayName = ircTagValue(tags, QStringLiteral("display-name"));
         const QString username = displayName.isEmpty() ? QStringLiteral("user") : displayName;
         const QString color = sanitizeChatColor(ircTagValue(tags, QStringLiteral("color")));
+        const bool isOwnMessage = !twitchLogin_.isEmpty() && senderLogin.compare(twitchLogin_, Qt::CaseInsensitive) == 0;
+        const QString commandResponse = isOwnMessage ? QString() : commandResponseForMessage(message);
         enqueueChatMessage(timestamp,
                            username,
                            color,
                            message,
                            parseIrcEmotes(ircTagValue(tags, QStringLiteral("emotes"))),
-                           commandResponseForMessage(message));
+                           commandResponse);
         return;
     }
 
@@ -1305,7 +1308,7 @@ void TwitchDockWidget::flushPendingChatMessages()
         }
 
         renderChatMessage(message);
-        if (!message.commandResponse.isEmpty()) {
+        if (!message.commandResponse.isEmpty() && sendChatMessage(message.commandResponse)) {
             appendCommandResponse(message.timestamp, message.commandResponse);
         }
         pendingChatMessages_.removeFirst();
@@ -1372,6 +1375,37 @@ void TwitchDockWidget::appendCommandResponse(const QString &timestamp, const QSt
                           .arg(timestamp.toHtmlEscaped(), escapedResponse));
     cursor.insertBlock();
     chatText_->setTextCursor(cursor);
+}
+
+bool TwitchDockWidget::sendChatMessage(const QString &message)
+{
+    if (chatSocket_->state() != QAbstractSocket::ConnectedState) {
+        appendChatSystemMessage(tr("Cannot send command response: chat is not connected."));
+        return false;
+    }
+
+    const QString channel = sanitizeChannelLogin(channelEdit_->text());
+    if (channel.isEmpty()) {
+        appendChatSystemMessage(tr("Cannot send command response: channel is not configured."));
+        return false;
+    }
+
+    QString outbound = message;
+    outbound.replace(QLatin1Char('\r'), QLatin1Char(' '));
+    outbound.replace(QLatin1Char('\n'), QLatin1Char(' '));
+    outbound = outbound.trimmed();
+    if (outbound.isEmpty()) {
+        return false;
+    }
+
+    const qint64 written =
+        chatSocket_->write("PRIVMSG #" + channel.toUtf8() + " :" + outbound.toUtf8() + "\r\n");
+    if (written < 0) {
+        appendChatSystemMessage(tr("Failed to send command response: %1").arg(chatSocket_->errorString()));
+        return false;
+    }
+
+    return true;
 }
 
 void TwitchDockWidget::requestEmoteImage(const QString &emoteId)
