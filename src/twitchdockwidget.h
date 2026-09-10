@@ -7,12 +7,14 @@
 #include <QLineEdit>
 #include <QList>
 #include <QListWidget>
+#include <QMap>
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
 #include <QPushButton>
 #include <QCompleter>
 #include <QSet>
 #include <QStringListModel>
+#include <QTableWidget>
 #include <QTcpServer>
 #include <QTcpSocket>
 #include <QTabWidget>
@@ -35,6 +37,8 @@ private slots:
 
     void connectChat();
     void onChatSocketReadyRead();
+
+    void addCommand();
 
     void addFriendLink();
     void removeSelectedFriendLink();
@@ -67,6 +71,19 @@ private:
 
     void buildUi();
     void loadPersistedUiState();
+    bool showCommandDialog(const QString &windowTitle,
+                           const QString &initialTrigger,
+                           const QString &initialResponse,
+                           QString &trigger,
+                           QString &response);
+    int commandRowForTrigger(const QString &trigger) const;
+    void populateCommandRow(int row, const QString &trigger, const QString &response);
+    void editCommandFromButton();
+    void deleteCommandFromButton();
+    void editCommand(const QString &existingTrigger);
+    void deleteCommand(const QString &trigger);
+    void persistCommands() const;
+    void loadPersistedCommands();
     void appendChatSystemMessage(const QString &message);
     void appendFormattedChatLine(const QByteArray &ircLine);
     QList<ChatEmoteOccurrence> parseIrcEmotes(const QString &emotesTag) const;
@@ -121,6 +138,7 @@ private:
 
     QListWidget *friendLinks_ = nullptr;
     QLineEdit *friendLinkInput_ = nullptr;
+    QTableWidget *commandsTable_ = nullptr;
 
     QTcpServer *oauthServer_ = nullptr;
     QTcpSocket *chatSocket_ = nullptr;
@@ -132,6 +150,7 @@ private:
     QString twitchLogin_;
     QString validatedToken_;
     QHash<QString, QImage> emoteImages_;
+    QMap<QString, QString> customCommands_;
     QSet<QString> pendingEmoteIds_;
     QSet<QString> unavailableEmoteIds_;
     QList<PendingChatMessage> pendingChatMessages_;
