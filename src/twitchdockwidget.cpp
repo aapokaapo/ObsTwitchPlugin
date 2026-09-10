@@ -1179,7 +1179,8 @@ void TwitchDockWidget::connectChat()
             return;
         }
         if (!validatedScopes_.contains(QStringLiteral("chat:edit"))) {
-            appendChatSystemMessage(tr("OAuth token is missing chat:edit scope, so command responses cannot be sent until you re-authorize."));
+            appendChatSystemMessage(tr("OAuth token is missing chat:edit scope. Click Authorize in Browser to reconnect chat and enable command responses."));
+            return;
         }
 
         const QString configuredChannel = sanitizeChannelLogin(channelEdit_->text());
