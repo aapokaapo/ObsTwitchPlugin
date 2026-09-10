@@ -18,6 +18,7 @@
 #include <QDialogButtonBox>
 #include <QFormLayout>
 #include <QHeaderView>
+#include <QMessageBox>
 #include <QPushButton>
 #include <QPointer>
 #include <QRegularExpression>
@@ -150,7 +151,17 @@ public:
         layout->addLayout(formLayout);
 
         auto *buttons = new QDialogButtonBox(QDialogButtonBox::Save | QDialogButtonBox::Cancel, this);
-        connect(buttons, &QDialogButtonBox::accepted, this, &QDialog::accept);
+        connect(buttons, &QDialogButtonBox::accepted, this, [this]() {
+            if (trigger().isEmpty()) {
+                QMessageBox::warning(this, tr("Invalid Command"), tr("Command trigger cannot be empty."));
+                return;
+            }
+            if (response().isEmpty()) {
+                QMessageBox::warning(this, tr("Invalid Command"), tr("Command response cannot be empty."));
+                return;
+            }
+            accept();
+        });
         connect(buttons, &QDialogButtonBox::rejected, this, &QDialog::reject);
         layout->addWidget(buttons);
 
@@ -750,8 +761,7 @@ bool TwitchDockWidget::showCommandDialog(const QString &windowTitle,
                                          const QString &initialTrigger,
                                          const QString &initialResponse,
                                          QString &trigger,
-                                         QString &response,
-                                         QString &errorMessage)
+                                         QString &response)
 {
     CommandDialog dialog(windowTitle, initialTrigger, initialResponse, this);
     if (dialog.exec() != QDialog::Accepted) {
@@ -760,16 +770,6 @@ bool TwitchDockWidget::showCommandDialog(const QString &windowTitle,
 
     trigger = dialog.trigger();
     response = dialog.response();
-    if (trigger.isEmpty()) {
-        errorMessage = tr("Command trigger cannot be empty.");
-        return false;
-    }
-    if (response.isEmpty()) {
-        errorMessage = tr("Command response cannot be empty.");
-        return false;
-    }
-
-    errorMessage.clear();
     return true;
 }
 
@@ -818,11 +818,7 @@ void TwitchDockWidget::addCommand()
 {
     QString trigger;
     QString response;
-    QString errorMessage;
-    if (!showCommandDialog(tr("Add Command"), {}, {}, trigger, response, errorMessage)) {
-        if (!errorMessage.isEmpty()) {
-            appendChatSystemMessage(errorMessage);
-        }
+    if (!showCommandDialog(tr("Add Command"), {}, {}, trigger, response)) {
         return;
     }
 
@@ -846,11 +842,7 @@ void TwitchDockWidget::editCommand(const QString &existingTrigger)
 
     QString trigger;
     QString response;
-    QString errorMessage;
-    if (!showCommandDialog(tr("Edit Command"), existingTrigger, it.value(), trigger, response, errorMessage)) {
-        if (!errorMessage.isEmpty()) {
-            appendChatSystemMessage(errorMessage);
-        }
+    if (!showCommandDialog(tr("Edit Command"), existingTrigger, it.value(), trigger, response)) {
         return;
     }
 
@@ -910,7 +902,7 @@ void TwitchDockWidget::loadPersistedCommands()
     for (int index = 0; index < size; ++index) {
         settings.setArrayIndex(index);
         const QString trigger = settings.value(kCommandTriggerSettingsKey).toString().trimmed();
-        const QString response = settings.value(kCommandResponseSettingsKey).toString().trimmed();
+        const QString response = settings.value(kCommandResponseSettingsKey).toString();
         if (!trigger.isEmpty() && !response.isEmpty()) {
             customCommands_.insert(trigger, response);
         }

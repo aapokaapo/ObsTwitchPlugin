@@ -75,8 +75,7 @@ private:
                            const QString &initialTrigger,
                            const QString &initialResponse,
                            QString &trigger,
-                           QString &response,
-                           QString &errorMessage);
+                           QString &response);
     void refreshCommandsTable();
     void editCommand(const QString &existingTrigger);
     void deleteCommand(const QString &trigger);
