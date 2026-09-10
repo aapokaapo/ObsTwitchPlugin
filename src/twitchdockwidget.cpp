@@ -883,7 +883,7 @@ void TwitchDockWidget::addCommand()
 
     customCommands_.insert(trigger, response);
     persistCommands();
-    const int row = std::distance(customCommands_.cbegin(), customCommands_.find(trigger));
+    const int row = std::distance(customCommands_.cbegin(), customCommands_.constFind(trigger));
     commandsTable_->insertRow(row);
     populateCommandRow(row, trigger, response);
     appendChatSystemMessage(tr("Saved command %1.").arg(trigger));
@@ -915,7 +915,7 @@ void TwitchDockWidget::editCommand(const QString &existingTrigger)
 
     customCommands_.insert(trigger, response);
     persistCommands();
-    const int row = std::distance(customCommands_.cbegin(), customCommands_.find(trigger));
+    const int row = std::distance(customCommands_.cbegin(), customCommands_.constFind(trigger));
     commandsTable_->insertRow(row);
     populateCommandRow(row, trigger, response);
     appendChatSystemMessage(tr("Updated command %1.").arg(trigger));
