@@ -1175,7 +1175,12 @@ void TwitchDockWidget::appendFormattedChatLine(const QByteArray &ircLine)
         const QString displayName = ircTagValue(tags, QStringLiteral("display-name"));
         const QString username = displayName.isEmpty() ? QStringLiteral("user") : displayName;
         const QString color = sanitizeChatColor(ircTagValue(tags, QStringLiteral("color")));
-        enqueueChatMessage(timestamp, username, color, message, parseIrcEmotes(ircTagValue(tags, QStringLiteral("emotes"))));
+        enqueueChatMessage(timestamp,
+                           username,
+                           color,
+                           message,
+                           parseIrcEmotes(ircTagValue(tags, QStringLiteral("emotes"))),
+                           commandResponseForMessage(message));
         return;
     }
 
@@ -1202,6 +1207,16 @@ void TwitchDockWidget::appendFormattedChatLine(const QByteArray &ircLine)
         command == QStringLiteral("376")) {
         return;
     }
+}
+
+QString TwitchDockWidget::commandResponseForMessage(const QString &message) const
+{
+    const QString trigger = message.trimmed();
+    if (trigger.isEmpty()) {
+        return {};
+    }
+
+    return customCommands_.value(trigger);
 }
 
 QList<TwitchDockWidget::ChatEmoteOccurrence> TwitchDockWidget::parseIrcEmotes(const QString &emotesTag) const
@@ -1251,13 +1266,15 @@ void TwitchDockWidget::enqueueChatMessage(const QString &timestamp,
                                           const QString &username,
                                           const QString &color,
                                           const QString &message,
-                                          const QList<ChatEmoteOccurrence> &emotes)
+                                          const QList<ChatEmoteOccurrence> &emotes,
+                                          const QString &commandResponse)
 {
     PendingChatMessage pendingMessage;
     pendingMessage.timestamp = timestamp;
     pendingMessage.username = username;
     pendingMessage.color = color;
     pendingMessage.message = message;
+    pendingMessage.commandResponse = commandResponse;
     pendingMessage.emotes = emotes;
 
     for (const ChatEmoteOccurrence &emote : emotes) {
@@ -1288,6 +1305,9 @@ void TwitchDockWidget::flushPendingChatMessages()
         }
 
         renderChatMessage(message);
+        if (!message.commandResponse.isEmpty()) {
+            appendCommandResponse(message.commandResponse);
+        }
         pendingChatMessages_.removeFirst();
     }
 }
@@ -1335,6 +1355,21 @@ void TwitchDockWidget::renderChatMessage(const PendingChatMessage &message)
     if (currentIndex < message.message.size()) {
         cursor.insertText(message.message.mid(currentIndex));
     }
+    cursor.insertBlock();
+    chatText_->setTextCursor(cursor);
+}
+
+void TwitchDockWidget::appendCommandResponse(const QString &response)
+{
+    QString escapedResponse = response.toHtmlEscaped();
+    escapedResponse.replace(QLatin1Char('\n'), QStringLiteral("<br/>"));
+
+    chatText_->moveCursor(QTextCursor::End);
+    QTextCursor cursor = chatText_->textCursor();
+    ensureChatEntryStartsOnNewLine(cursor);
+    cursor.insertHtml(QStringLiteral("<span style='color:#8f8fa3;'>%1</span> <span style='color:#53fc18;'>[command]</span> "
+                                     "<span style='color:#efeff1;'>%2</span>")
+                          .arg(QTime::currentTime().toString(QStringLiteral("HH:mm")), escapedResponse));
     cursor.insertBlock();
     chatText_->setTextCursor(cursor);
 }

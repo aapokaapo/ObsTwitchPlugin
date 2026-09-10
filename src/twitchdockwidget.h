@@ -65,6 +65,7 @@ private:
         QString username;
         QString color;
         QString message;
+        QString commandResponse;
         QList<ChatEmoteOccurrence> emotes;
         QSet<QString> requiredEmoteIds;
     };
@@ -85,13 +86,16 @@ private:
     void persistCommands() const;
     void loadPersistedCommands();
     void appendChatSystemMessage(const QString &message);
+    void appendCommandResponse(const QString &response);
     void appendFormattedChatLine(const QByteArray &ircLine);
+    QString commandResponseForMessage(const QString &message) const;
     QList<ChatEmoteOccurrence> parseIrcEmotes(const QString &emotesTag) const;
     void enqueueChatMessage(const QString &timestamp,
                             const QString &username,
                             const QString &color,
                             const QString &message,
-                            const QList<ChatEmoteOccurrence> &emotes);
+                            const QList<ChatEmoteOccurrence> &emotes,
+                            const QString &commandResponse = {});
     void flushPendingChatMessages();
     void renderChatMessage(const PendingChatMessage &message);
     void requestEmoteImage(const QString &emoteId);
