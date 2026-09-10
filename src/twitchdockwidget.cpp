@@ -14,11 +14,17 @@
 #include <QNetworkReply>
 #include <QNetworkRequest>
 #include <QColor>
+#include <QDialog>
+#include <QDialogButtonBox>
+#include <QFormLayout>
+#include <QHeaderView>
 #include <QPushButton>
 #include <QPointer>
 #include <QRegularExpression>
 #include <QSettings>
 #include <QStandardPaths>
+#include <QTableWidget>
+#include <QTableWidgetItem>
 #include <QTextBlock>
 #include <QTextCursor>
 #include <QTextDocument>
@@ -45,6 +51,9 @@ constexpr auto kTokenSettingsGroup = "ObsTwitchPlugin";
 constexpr auto kTokenSettingsKey = "twitch_oauth_token";
 constexpr auto kChatChannelSettingsKey = "chat_channel";
 constexpr auto kClientIdSettingsKey = "twitch_client_id";
+constexpr auto kCommandsArraySettingsKey = "custom_commands";
+constexpr auto kCommandTriggerSettingsKey = "trigger";
+constexpr auto kCommandResponseSettingsKey = "response";
 constexpr quint16 kOAuthRedirectPort = 38471;
 constexpr auto kDefaultChatColor = "#bf94ff";
 constexpr auto kChatMessageTextColor = "#efeff1";
@@ -112,6 +121,58 @@ QUrl emoteResourceUrl(const QString &emoteId)
     return QUrl(QStringLiteral("twitch-emote://%1").arg(emoteId));
 }
 
+class CommandDialog final : public QDialog {
+public:
+    CommandDialog(const QString &windowTitle,
+                  const QString &initialTrigger,
+                  const QString &initialResponse,
+                  QWidget *parent = nullptr)
+        : QDialog(parent)
+    {
+        setWindowTitle(windowTitle);
+        setModal(true);
+        resize(520, 260);
+
+        auto *layout = new QVBoxLayout(this);
+        auto *formLayout = new QFormLayout();
+
+        triggerEdit_ = new QLineEdit(this);
+        triggerEdit_->setPlaceholderText(tr("!command"));
+        triggerEdit_->setText(initialTrigger);
+
+        responseEdit_ = new QTextEdit(this);
+        responseEdit_->setAcceptRichText(false);
+        responseEdit_->setPlaceholderText(tr("Command response text"));
+        responseEdit_->setPlainText(initialResponse);
+
+        formLayout->addRow(tr("Trigger"), triggerEdit_);
+        formLayout->addRow(tr("Response"), responseEdit_);
+        layout->addLayout(formLayout);
+
+        auto *buttons = new QDialogButtonBox(QDialogButtonBox::Save | QDialogButtonBox::Cancel, this);
+        connect(buttons, &QDialogButtonBox::accepted, this, &QDialog::accept);
+        connect(buttons, &QDialogButtonBox::rejected, this, &QDialog::reject);
+        layout->addWidget(buttons);
+
+        triggerEdit_->setFocus();
+        triggerEdit_->selectAll();
+    }
+
+    QString trigger() const
+    {
+        return triggerEdit_->text().trimmed();
+    }
+
+    QString response() const
+    {
+        return responseEdit_->toPlainText().trimmed();
+    }
+
+private:
+    QLineEdit *triggerEdit_ = nullptr;
+    QTextEdit *responseEdit_ = nullptr;
+};
+
 }
 
 TwitchDockWidget::TwitchDockWidget(QWidget *parent)
@@ -132,6 +193,8 @@ TwitchDockWidget::TwitchDockWidget(QWidget *parent)
     });
 
     loadPersistedUiState();
+    loadPersistedCommands();
+    refreshCommandsTable();
     QTimer::singleShot(0, this, &TwitchDockWidget::refreshObsServiceData);
 }
 
@@ -283,6 +346,31 @@ void TwitchDockWidget::buildUi()
     friendLayout->addLayout(friendButtonRow);
 
     tabs_->addTab(friendTab, tr("Friend Streaming"));
+
+    auto *commandsTab = new QWidget(this);
+    auto *commandsLayout = new QVBoxLayout(commandsTab);
+    auto *commandButtonRow = new QHBoxLayout();
+    commandButtonRow->addStretch();
+    auto *addCommandButton = new QPushButton(tr("Add Command"), commandsTab);
+    commandButtonRow->addWidget(addCommandButton);
+
+    commandsTable_ = new QTableWidget(commandsTab);
+    commandsTable_->setColumnCount(3);
+    commandsTable_->setHorizontalHeaderLabels({tr("Trigger"), tr("Response"), tr("Actions")});
+    commandsTable_->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    commandsTable_->setSelectionMode(QAbstractItemView::NoSelection);
+    commandsTable_->setFocusPolicy(Qt::NoFocus);
+    commandsTable_->verticalHeader()->setVisible(false);
+    commandsTable_->horizontalHeader()->setStretchLastSection(false);
+    commandsTable_->horizontalHeader()->setSectionResizeMode(0, QHeaderView::ResizeToContents);
+    commandsTable_->horizontalHeader()->setSectionResizeMode(1, QHeaderView::Stretch);
+    commandsTable_->horizontalHeader()->setSectionResizeMode(2, QHeaderView::ResizeToContents);
+
+    connect(addCommandButton, &QPushButton::clicked, this, &TwitchDockWidget::addCommand);
+
+    commandsLayout->addLayout(commandButtonRow);
+    commandsLayout->addWidget(commandsTable_);
+    tabs_->addTab(commandsTab, tr("Commands"));
     layout->addWidget(tabs_);
 }
 
@@ -656,6 +744,177 @@ void TwitchDockWidget::loadPersistedUiState()
     channelEdit_->setText(loadCachedChatChannel());
     clientIdEdit_->setText(loadCachedClientId());
     tokenEdit_->setText(loadCachedOAuthToken());
+}
+
+bool TwitchDockWidget::showCommandDialog(const QString &windowTitle,
+                                         const QString &initialTrigger,
+                                         const QString &initialResponse,
+                                         QString &trigger,
+                                         QString &response,
+                                         QString &errorMessage) const
+{
+    CommandDialog dialog(windowTitle, initialTrigger, initialResponse, const_cast<TwitchDockWidget *>(this));
+    if (dialog.exec() != QDialog::Accepted) {
+        return false;
+    }
+
+    trigger = dialog.trigger();
+    response = dialog.response();
+    if (trigger.isEmpty()) {
+        errorMessage = tr("Command trigger cannot be empty.");
+        return false;
+    }
+    if (response.isEmpty()) {
+        errorMessage = tr("Command response cannot be empty.");
+        return false;
+    }
+
+    errorMessage.clear();
+    return true;
+}
+
+void TwitchDockWidget::refreshCommandsTable()
+{
+    if (!commandsTable_) {
+        return;
+    }
+
+    commandsTable_->setRowCount(customCommands_.size());
+
+    int row = 0;
+    for (auto it = customCommands_.cbegin(); it != customCommands_.cend(); ++it, ++row) {
+        auto *triggerItem = new QTableWidgetItem(it.key());
+        auto *responseItem = new QTableWidgetItem(it.value());
+        triggerItem->setFlags(triggerItem->flags() & ~Qt::ItemIsEditable);
+        responseItem->setFlags(responseItem->flags() & ~Qt::ItemIsEditable);
+        commandsTable_->setItem(row, 0, triggerItem);
+        commandsTable_->setItem(row, 1, responseItem);
+
+        auto *actionsWidget = new QWidget(commandsTable_);
+        auto *actionsLayout = new QHBoxLayout(actionsWidget);
+        actionsLayout->setContentsMargins(0, 0, 0, 0);
+        actionsLayout->setSpacing(6);
+
+        auto *editButton = new QPushButton(tr("Edit"), actionsWidget);
+        auto *deleteButton = new QPushButton(tr("Delete"), actionsWidget);
+        const QString trigger = it.key();
+        connect(editButton, &QPushButton::clicked, this, [this, trigger]() {
+            editCommand(trigger);
+        });
+        connect(deleteButton, &QPushButton::clicked, this, [this, trigger]() {
+            deleteCommand(trigger);
+        });
+
+        actionsLayout->addWidget(editButton);
+        actionsLayout->addWidget(deleteButton);
+        actionsLayout->addStretch();
+        commandsTable_->setCellWidget(row, 2, actionsWidget);
+    }
+}
+
+void TwitchDockWidget::addCommand()
+{
+    QString trigger;
+    QString response;
+    QString errorMessage;
+    if (!showCommandDialog(tr("Add Command"), {}, {}, trigger, response, errorMessage)) {
+        if (!errorMessage.isEmpty()) {
+            appendChatSystemMessage(errorMessage);
+        }
+        return;
+    }
+
+    if (customCommands_.contains(trigger)) {
+        appendChatSystemMessage(tr("Command %1 already exists. Edit it instead.").arg(trigger));
+        return;
+    }
+
+    customCommands_.insert(trigger, response);
+    persistCommands();
+    refreshCommandsTable();
+    appendChatSystemMessage(tr("Saved command %1.").arg(trigger));
+}
+
+void TwitchDockWidget::editCommand(const QString &existingTrigger)
+{
+    const auto it = customCommands_.constFind(existingTrigger);
+    if (it == customCommands_.cend()) {
+        return;
+    }
+
+    QString trigger;
+    QString response;
+    QString errorMessage;
+    if (!showCommandDialog(tr("Edit Command"), existingTrigger, it.value(), trigger, response, errorMessage)) {
+        if (!errorMessage.isEmpty()) {
+            appendChatSystemMessage(errorMessage);
+        }
+        return;
+    }
+
+    if (trigger != existingTrigger && customCommands_.contains(trigger)) {
+        appendChatSystemMessage(tr("Command %1 already exists. Choose a different trigger.").arg(trigger));
+        return;
+    }
+
+    customCommands_.remove(existingTrigger);
+    customCommands_.insert(trigger, response);
+    persistCommands();
+    refreshCommandsTable();
+    appendChatSystemMessage(tr("Updated command %1.").arg(trigger));
+}
+
+void TwitchDockWidget::deleteCommand(const QString &trigger)
+{
+    if (customCommands_.remove(trigger) == 0) {
+        return;
+    }
+
+    persistCommands();
+    refreshCommandsTable();
+    appendChatSystemMessage(tr("Deleted command %1.").arg(trigger));
+}
+
+void TwitchDockWidget::persistCommands() const
+{
+    const QString configDir = QStandardPaths::writableLocation(QStandardPaths::AppConfigLocation);
+    QDir().mkpath(configDir);
+
+    const QString settingsPath = configDir + QStringLiteral("/obstwitchplugin.ini");
+    QSettings settings(settingsPath, QSettings::IniFormat);
+    settings.beginGroup(kTokenSettingsGroup);
+    settings.remove(kCommandsArraySettingsKey);
+    settings.beginWriteArray(kCommandsArraySettingsKey);
+    int index = 0;
+    for (auto it = customCommands_.cbegin(); it != customCommands_.cend(); ++it, ++index) {
+        settings.setArrayIndex(index);
+        settings.setValue(kCommandTriggerSettingsKey, it.key());
+        settings.setValue(kCommandResponseSettingsKey, it.value());
+    }
+    settings.endArray();
+    settings.endGroup();
+    settings.sync();
+}
+
+void TwitchDockWidget::loadPersistedCommands()
+{
+    customCommands_.clear();
+
+    const QString configDir = QStandardPaths::writableLocation(QStandardPaths::AppConfigLocation);
+    const QString settingsPath = configDir + QStringLiteral("/obstwitchplugin.ini");
+    QSettings settings(settingsPath, QSettings::IniFormat);
+    settings.beginGroup(kTokenSettingsGroup);
+    const int size = settings.beginReadArray(kCommandsArraySettingsKey);
+    for (int index = 0; index < size; ++index) {
+        settings.setArrayIndex(index);
+        const QString trigger = settings.value(kCommandTriggerSettingsKey).toString().trimmed();
+        const QString response = settings.value(kCommandResponseSettingsKey).toString().trimmed();
+        if (!trigger.isEmpty() && !response.isEmpty()) {
+            customCommands_.insert(trigger, response);
+        }
+    }
+    settings.endArray();
+    settings.endGroup();
 }
 
 void TwitchDockWidget::resolveIdentity(const QString &token, std::function<void(bool)> continuation)
