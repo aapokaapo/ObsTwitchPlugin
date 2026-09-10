@@ -911,7 +911,7 @@ void TwitchDockWidget::loadPersistedCommands()
         settings.setArrayIndex(index);
         const QString trigger = settings.value(kCommandTriggerSettingsKey).toString().trimmed();
         const QString response = settings.value(kCommandResponseSettingsKey).toString();
-        if (!trigger.isEmpty() && !response.isEmpty()) {
+        if (!trigger.isEmpty() && trigger.startsWith(QLatin1Char('!')) && !response.isEmpty()) {
             customCommands_.insert(trigger, response);
         }
     }
