@@ -55,6 +55,7 @@ constexpr auto kCommandsSettingsGroup = "Commands";
 constexpr auto kTokenSettingsKey = "twitch_oauth_token";
 constexpr auto kChatChannelSettingsKey = "chat_channel";
 constexpr auto kClientIdSettingsKey = "twitch_client_id";
+constexpr auto kClientSecretSettingsKey = "twitch_client_secret";
 constexpr auto kCommandsArraySettingsKey = "custom_commands";
 constexpr auto kCommandTriggerSettingsKey = "trigger";
 constexpr auto kCommandResponseSettingsKey = "response";
@@ -63,6 +64,7 @@ constexpr auto kDefaultChatColor = "#bf94ff";
 constexpr auto kChatMessageTextColor = "#efeff1";
 constexpr int kCategorySuggestionLimit = 20;
 constexpr qint64 kPendingEmoteWaitTimeoutMs = 5000;
+constexpr int kMaxTwitchChatMessageLength = 500;
 constexpr int kMaxCommandChainDepth = 16;
 
 void ensureChatEntryStartsOnNewLine(QTextCursor &cursor)
@@ -184,12 +186,15 @@ public:
 
         responseEdit_ = new QTextEdit(this);
         responseEdit_->setAcceptRichText(false);
-        responseEdit_->setPlaceholderText(tr("Command response text"));
+        responseEdit_->setPlaceholderText(
+            tr("Command response text (max %1 characters)").arg(kMaxTwitchChatMessageLength));
         responseEdit_->setPlainText(initialResponse);
 
         formLayout->addRow(tr("Trigger"), triggerEdit_);
         formLayout->addRow(tr("Response"), responseEdit_);
         layout->addLayout(formLayout);
+        layout->addWidget(
+            new QLabel(tr("Twitch chat responses are limited to %1 characters.").arg(kMaxTwitchChatMessageLength), this));
 
         auto *buttons = new QDialogButtonBox(QDialogButtonBox::Save | QDialogButtonBox::Cancel, this);
         connect(buttons, &QDialogButtonBox::accepted, this, [this]() {
@@ -199,6 +204,13 @@ public:
             }
             if (response().isEmpty()) {
                 QMessageBox::warning(this, tr("Invalid Command"), tr("Command response cannot be empty."));
+                return;
+            }
+            if (response().size() > kMaxTwitchChatMessageLength) {
+                QMessageBox::warning(this,
+                                     tr("Invalid Command"),
+                                     tr("Command response exceeds Twitch's %1 character limit.")
+                                         .arg(kMaxTwitchChatMessageLength));
                 return;
             }
             accept();
@@ -331,6 +343,9 @@ void TwitchDockWidget::buildUi()
     });
     clientSecretEdit_ = new QLineEdit(streamTab);
     clientSecretEdit_->setEchoMode(QLineEdit::Password);
+    connect(clientSecretEdit_, &QLineEdit::editingFinished, this, [this]() {
+        persistClientSecret(clientSecretEdit_->text());
+    });
     tokenEdit_ = new QLineEdit(streamTab);
     tokenEdit_->setEchoMode(QLineEdit::Password);
     auto *oauthHelpLabel = new QLabel(
@@ -463,6 +478,9 @@ void TwitchDockWidget::refreshObsServiceData()
     }
     if (!credentials.clientSecret.isEmpty()) {
         clientSecretEdit_->setText(credentials.clientSecret);
+        persistClientSecret(credentials.clientSecret);
+    } else {
+        clientSecretEdit_->setText(loadCachedClientSecret());
     }
     appendChatSystemMessage(
         credentials.streamKey.isEmpty() ? tr("Stream key not found in current OBS service/profile settings.")
@@ -564,6 +582,7 @@ TwitchDockWidget::TwitchCredentials TwitchDockWidget::extractCredentialsFromObsP
 void TwitchDockWidget::ensureOAuthToken()
 {
     const QString clientId = clientIdEdit_->text().trimmed();
+    const QString clientSecret = clientSecretEdit_->text().trimmed();
     if (clientId.isEmpty()) {
         appendChatSystemMessage(
             tr("Provide Twitch Client ID before starting OAuth. Use Open Twitch Developer Console and register redirect URL %1.")
@@ -571,6 +590,7 @@ void TwitchDockWidget::ensureOAuthToken()
         return;
     }
     persistClientId(clientId);
+    persistClientSecret(clientSecret);
 
     const auto startAuthorizationFlow = [this, clientId]() {
         startOAuthServer();
@@ -785,6 +805,39 @@ QString TwitchDockWidget::loadCachedClientId() const
     return clientId;
 }
 
+void TwitchDockWidget::persistClientSecret(const QString &clientSecret)
+{
+    const QString value = clientSecret.trimmed();
+
+    const QString configDir = QStandardPaths::writableLocation(QStandardPaths::AppConfigLocation);
+    QDir().mkpath(configDir);
+
+    const QString settingsPath = configDir + QStringLiteral("/obstwitchplugin.ini");
+    QSettings settings(settingsPath, QSettings::IniFormat);
+    settings.beginGroup(kTokenSettingsGroup);
+    if (value.isEmpty()) {
+        settings.remove(kClientSecretSettingsKey);
+    } else {
+        settings.setValue(kClientSecretSettingsKey, value);
+    }
+    settings.endGroup();
+    settings.sync();
+
+    QFile::setPermissions(settingsPath, QFile::ReadOwner | QFile::WriteOwner);
+}
+
+QString TwitchDockWidget::loadCachedClientSecret() const
+{
+    const QString configDir = QStandardPaths::writableLocation(QStandardPaths::AppConfigLocation);
+    const QString settingsPath = configDir + QStringLiteral("/obstwitchplugin.ini");
+
+    QSettings settings(settingsPath, QSettings::IniFormat);
+    settings.beginGroup(kTokenSettingsGroup);
+    const QString clientSecret = settings.value(kClientSecretSettingsKey).toString().trimmed();
+    settings.endGroup();
+    return clientSecret;
+}
+
 void TwitchDockWidget::persistChatChannel(const QString &channel)
 {
     const QString normalized = sanitizeChannelLogin(channel);
@@ -825,6 +878,7 @@ void TwitchDockWidget::loadPersistedUiState()
 {
     channelEdit_->setText(loadCachedChatChannel());
     clientIdEdit_->setText(loadCachedClientId());
+    clientSecretEdit_->setText(loadCachedClientSecret());
     tokenEdit_->setText(loadCachedOAuthToken());
 }
 
@@ -1550,6 +1604,12 @@ bool TwitchDockWidget::sendChatMessage(const QString &message, int commandDepth)
     outbound.replace(QLatin1Char('\n'), QLatin1Char(' '));
     outbound = outbound.trimmed();
     if (outbound.isEmpty()) {
+        return false;
+    }
+    if (outbound.size() > kMaxTwitchChatMessageLength) {
+        appendChatSystemMessage(
+            tr("Cannot send chat message: Twitch messages are limited to %1 characters.")
+                .arg(kMaxTwitchChatMessageLength));
         return false;
     }
 
