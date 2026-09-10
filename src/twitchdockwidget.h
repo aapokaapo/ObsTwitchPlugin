@@ -116,6 +116,8 @@ private:
     QString loadCachedChatChannel() const;
     void persistClientId(const QString &clientId);
     QString loadCachedClientId() const;
+    void persistClientSecret(const QString &clientSecret);
+    QString loadCachedClientSecret() const;
     void fetchCurrentChannelInfo();
     void fetchCategorySuggestions(const QString &query);
     void resolveCategoryId(const QString &token,
