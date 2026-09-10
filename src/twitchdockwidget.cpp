@@ -242,7 +242,8 @@ void TwitchDockWidget::buildUi()
     streamLayout->addWidget(gameIdEdit_, 1, 1);
     streamLayout->addWidget(updateButton, 2, 0, 1, 2);
     streamLayout->addWidget(refreshButton, 3, 0, 1, 2);
-    streamLayout->addWidget(toggleAuthFieldsButton_, 4, 0, 1, 2);
+    streamLayout->setRowStretch(4, 1);
+    streamLayout->addWidget(toggleAuthFieldsButton_, 5, 0, 1, 2);
 
     connect(refreshButton, &QPushButton::clicked, this, &TwitchDockWidget::refreshObsServiceData);
     connect(developerConsoleButton, &QPushButton::clicked, this, &TwitchDockWidget::openTwitchDeveloperConsole);
