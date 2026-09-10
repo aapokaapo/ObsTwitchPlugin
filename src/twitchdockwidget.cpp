@@ -49,7 +49,7 @@ extern "C" {
 
 namespace {
 constexpr auto kTokenSettingsGroup = "ObsTwitchPlugin";
-constexpr auto kCommandsSettingsGroup = "ObsTwitchPlugin/Commands";
+constexpr auto kCommandsSettingsGroup = "Commands";
 constexpr auto kTokenSettingsKey = "twitch_oauth_token";
 constexpr auto kChatChannelSettingsKey = "chat_channel";
 constexpr auto kClientIdSettingsKey = "twitch_client_id";
@@ -155,6 +155,10 @@ public:
         connect(buttons, &QDialogButtonBox::accepted, this, [this]() {
             if (trigger().isEmpty()) {
                 QMessageBox::warning(this, tr("Invalid Command"), tr("Command trigger cannot be empty."));
+                return;
+            }
+            if (!trigger().startsWith(QLatin1Char('!'))) {
+                QMessageBox::warning(this, tr("Invalid Command"), tr("Command trigger must start with !."));
                 return;
             }
             if (response().isEmpty()) {
@@ -877,6 +881,7 @@ void TwitchDockWidget::persistCommands() const
 
     const QString settingsPath = configDir + QStringLiteral("/obstwitchplugin.ini");
     QSettings settings(settingsPath, QSettings::IniFormat);
+    settings.beginGroup(kTokenSettingsGroup);
     settings.beginGroup(kCommandsSettingsGroup);
     settings.remove(kCommandsArraySettingsKey);
     settings.beginWriteArray(kCommandsArraySettingsKey);
@@ -888,6 +893,7 @@ void TwitchDockWidget::persistCommands() const
     }
     settings.endArray();
     settings.endGroup();
+    settings.endGroup();
     settings.sync();
 }
 
@@ -898,6 +904,7 @@ void TwitchDockWidget::loadPersistedCommands()
     const QString configDir = QStandardPaths::writableLocation(QStandardPaths::AppConfigLocation);
     const QString settingsPath = configDir + QStringLiteral("/obstwitchplugin.ini");
     QSettings settings(settingsPath, QSettings::IniFormat);
+    settings.beginGroup(kTokenSettingsGroup);
     settings.beginGroup(kCommandsSettingsGroup);
     const int size = settings.beginReadArray(kCommandsArraySettingsKey);
     for (int index = 0; index < size; ++index) {
@@ -909,6 +916,7 @@ void TwitchDockWidget::loadPersistedCommands()
         }
     }
     settings.endArray();
+    settings.endGroup();
     settings.endGroup();
 }
 
