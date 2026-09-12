@@ -64,6 +64,7 @@ constexpr auto kDefaultChatColor = "#bf94ff";
 constexpr auto kChatMessageTextColor = "#efeff1";
 constexpr int kCategorySuggestionLimit = 20;
 constexpr qint64 kPendingEmoteWaitTimeoutMs = 5000;
+constexpr int kFollowerPollIntervalMs = 30000;
 constexpr int kMaxTwitchChatMessageLength = 500;
 constexpr int kMaxCommandChainDepth = 16;
 
@@ -85,6 +86,7 @@ const QStringList &requiredOAuthScopes()
         QStringLiteral("channel:manage:broadcast"),
         QStringLiteral("chat:read"),
         QStringLiteral("chat:edit"),
+        QStringLiteral("moderator:read:followers"),
     };
     return scopes;
 }
@@ -113,7 +115,39 @@ QString ircTagValue(const QString &tags, const QString &key)
         if (!part.startsWith(prefix)) {
             continue;
         }
-        return part.mid(prefix.size());
+
+        const QString rawValue = part.mid(prefix.size());
+        QString decodedValue;
+        decodedValue.reserve(rawValue.size());
+        for (int index = 0; index < rawValue.size(); ++index) {
+            if (rawValue.at(index) != QLatin1Char('\\') || index + 1 >= rawValue.size()) {
+                decodedValue.append(rawValue.at(index));
+                continue;
+            }
+
+            ++index;
+            switch (rawValue.at(index).unicode()) {
+            case 's':
+                decodedValue.append(QLatin1Char(' '));
+                break;
+            case ':':
+                decodedValue.append(QLatin1Char(';'));
+                break;
+            case 'r':
+                decodedValue.append(QLatin1Char('\r'));
+                break;
+            case 'n':
+                decodedValue.append(QLatin1Char('\n'));
+                break;
+            case '\\':
+                decodedValue.append(QLatin1Char('\\'));
+                break;
+            default:
+                decodedValue.append(rawValue.at(index));
+                break;
+            }
+        }
+        return decodedValue;
     }
     return {};
 }
@@ -228,12 +262,16 @@ TwitchDockWidget::TwitchDockWidget(QWidget *parent)
 
     connect(oauthServer_, &QTcpServer::newConnection, this, &TwitchDockWidget::onOAuthServerConnection);
     connect(chatSocket_, &QTcpSocket::readyRead, this, &TwitchDockWidget::onChatSocketReadyRead);
+    connect(chatSocket_, &QTcpSocket::disconnected, this, [this]() { stopFollowerActivityPolling(); });
     categorySuggestTimer_ = new QTimer(this);
     categorySuggestTimer_->setSingleShot(true);
     categorySuggestTimer_->setInterval(250);
     connect(categorySuggestTimer_, &QTimer::timeout, this, [this]() {
         fetchCategorySuggestions(gameIdEdit_->text().trimmed());
     });
+    followerPollTimer_ = new QTimer(this);
+    followerPollTimer_->setInterval(kFollowerPollIntervalMs);
+    connect(followerPollTimer_, &QTimer::timeout, this, [this]() { pollLatestFollowers(false); });
 
     loadPersistedUiState();
     loadPersistedCommands();
@@ -249,6 +287,8 @@ TwitchDockWidget::~TwitchDockWidget()
     if (chatSocket_) {
         chatSocket_->abort();
     }
+
+    stopFollowerActivityPolling();
 }
 
 void TwitchDockWidget::buildUi()
@@ -328,7 +368,7 @@ void TwitchDockWidget::buildUi()
     tokenEdit_ = new QLineEdit(streamTab);
     tokenEdit_->setEchoMode(QLineEdit::Password);
     auto *oauthHelpLabel = new QLabel(
-        tr("Create a Twitch app in the Developer Console, add redirect URL %1, paste the Client ID and Client Secret here, then click Authorize in Browser to grant channel update plus chat read/write access.")
+        tr("Create a Twitch app in the Developer Console, add redirect URL %1, paste the Client ID and Client Secret here, then click Authorize in Browser to grant channel update, chat read/write, and follower activity access.")
             .arg(oauthRedirectUrl()),
         nullptr);
     oauthHelpLabel->setWordWrap(true);
@@ -1199,6 +1239,7 @@ void TwitchDockWidget::connectChat()
 {
     const QString token = tokenEdit_->text().trimmed();
     chatCanSendMessages_ = false;
+    stopFollowerActivityPolling();
     if (token.isEmpty()) {
         appendChatSystemMessage(tr("Chat connection requires an OAuth token with chat:read scope and chat:edit for command responses."));
         return;
@@ -1240,6 +1281,13 @@ void TwitchDockWidget::connectChat()
         chatSocket_->write("JOIN #" + channel.toUtf8() + "\r\n");
 
         appendChatSystemMessage(tr("Connected to Twitch IRC and joined #%1.").arg(channel));
+
+        if (scopes.contains(QStringLiteral("moderator:read:followers"))) {
+            startFollowerActivityPolling(token, clientIdEdit_->text().trimmed());
+        } else {
+            appendChatSystemMessage(
+                tr("OAuth token is missing moderator:read:followers scope, so follow activity will not appear until you re-authorize."));
+        }
     });
 }
 
@@ -1275,6 +1323,18 @@ void TwitchDockWidget::appendChatSystemMessage(const QString &message)
     ensureChatEntryStartsOnNewLine(cursor);
     cursor.insertHtml(QStringLiteral("<span style='color:#adadb8;'>[system]</span> <span style='color:#d3d3da;'>%1</span>")
                           .arg(message.toHtmlEscaped()));
+    cursor.insertBlock();
+    chatText_->setTextCursor(cursor);
+}
+
+void TwitchDockWidget::appendChatActivityMessage(const QString &timestamp, const QString &message)
+{
+    chatText_->moveCursor(QTextCursor::End);
+    QTextCursor cursor = chatText_->textCursor();
+    ensureChatEntryStartsOnNewLine(cursor);
+    cursor.insertHtml(QStringLiteral("<span style='color:#8f8fa3;'>%1</span> <span style='color:#00d084;'>[activity]</span> "
+                                     "<span style='color:#efeff1;'>%2</span>")
+                          .arg(timestamp.toHtmlEscaped(), message.toHtmlEscaped()));
     cursor.insertBlock();
     chatText_->setTextCursor(cursor);
 }
@@ -1327,6 +1387,53 @@ void TwitchDockWidget::appendFormattedChatLine(const QByteArray &ircLine)
                            commandResponse,
                            0);
         return;
+    }
+
+    static const QRegularExpression userNoticePattern(
+        QStringLiteral("^@([^\\s]+)\\s+:tmi\\.twitch\\.tv\\s+USERNOTICE\\s+#[^\\s]+(?:\\s+:(.*))?$"));
+    const QRegularExpressionMatch userNoticeMatch = userNoticePattern.match(line);
+    if (userNoticeMatch.hasMatch()) {
+        const QString tags = userNoticeMatch.captured(1);
+        const QString msgId = ircTagValue(tags, QStringLiteral("msg-id"));
+        const QSet<QString> supportedNoticeIds = {
+            QStringLiteral("sub"),          QStringLiteral("resub"),        QStringLiteral("subgift"),
+            QStringLiteral("anonsubgift"),  QStringLiteral("submysterygift"), QStringLiteral("anonsubmysterygift"),
+            QStringLiteral("giftpaidupgrade"), QStringLiteral("anongiftpaidupgrade"),
+            QStringLiteral("primepaidupgrade"), QStringLiteral("raid"),
+        };
+        if (supportedNoticeIds.contains(msgId)) {
+            QString activity = ircTagValue(tags, QStringLiteral("system-msg")).trimmed();
+            if (activity.isEmpty()) {
+                const QString actor = ircTagValue(tags, QStringLiteral("display-name"));
+                const QString recipient = ircTagValue(tags, QStringLiteral("msg-param-recipient-display-name"));
+                const QString raidViewerCount = ircTagValue(tags, QStringLiteral("msg-param-viewerCount"));
+                if (msgId == QStringLiteral("sub") || msgId == QStringLiteral("resub") ||
+                    msgId == QStringLiteral("primepaidupgrade")) {
+                    activity = tr("%1 subscribed.").arg(actor.isEmpty() ? tr("A viewer") : actor);
+                } else if (msgId == QStringLiteral("subgift") || msgId == QStringLiteral("anonsubgift")) {
+                    activity =
+                        tr("%1 gifted a subscription to %2.")
+                            .arg(actor.isEmpty() ? tr("A viewer") : actor, recipient.isEmpty() ? tr("another viewer") : recipient);
+                } else if (msgId == QStringLiteral("submysterygift") || msgId == QStringLiteral("anonsubmysterygift")) {
+                    activity = tr("%1 gifted community subscriptions.").arg(actor.isEmpty() ? tr("A viewer") : actor);
+                } else if (msgId == QStringLiteral("giftpaidupgrade") || msgId == QStringLiteral("anongiftpaidupgrade")) {
+                    activity = tr("%1 continued a gifted subscription.").arg(actor.isEmpty() ? tr("A viewer") : actor);
+                } else if (msgId == QStringLiteral("raid")) {
+                    activity = tr("%1 is raiding with a party of %2.")
+                                   .arg(actor.isEmpty() ? tr("A channel") : actor,
+                                        raidViewerCount.isEmpty() ? tr("unknown size") : raidViewerCount);
+                }
+            }
+
+            const QString userMessage = userNoticeMatch.captured(2).trimmed();
+            if (!userMessage.isEmpty()) {
+                activity += tr(" — %1").arg(userMessage);
+            }
+            if (!activity.isEmpty()) {
+                appendChatActivityMessage(timestamp, activity);
+            }
+            return;
+        }
     }
 
     static const QRegularExpression noticePattern(QStringLiteral("NOTICE\\s+#[^\\s]+\\s+:(.*)$"));
@@ -1701,6 +1808,111 @@ void TwitchDockWidget::fetchCurrentChannelInfo()
                 tr("Loaded current stream info from Twitch (title and game%1).")
                     .arg(gameName.isEmpty() ? QString() : QStringLiteral(": %1").arg(gameName)));
         });
+    });
+}
+
+void TwitchDockWidget::startFollowerActivityPolling(const QString &token, const QString &clientId)
+{
+    followerPollToken_ = token.trimmed();
+    followerPollClientId_ = clientId.trimmed();
+    knownFollowerIds_.clear();
+    followerSnapshotInitialized_ = false;
+    pollLatestFollowers(true);
+    if (followerPollTimer_) {
+        followerPollTimer_->start();
+    }
+}
+
+void TwitchDockWidget::stopFollowerActivityPolling()
+{
+    if (followerPollTimer_) {
+        followerPollTimer_->stop();
+    }
+    followerPollToken_.clear();
+    followerPollClientId_.clear();
+    knownFollowerIds_.clear();
+    followerSnapshotInitialized_ = false;
+}
+
+void TwitchDockWidget::pollLatestFollowers(bool initializeSnapshot)
+{
+    if (followerPollToken_.isEmpty() || followerPollClientId_.isEmpty() || broadcasterId_.isEmpty()) {
+        return;
+    }
+
+    QUrl url(QStringLiteral("https://api.twitch.tv/helix/channels/followers"));
+    QUrlQuery query;
+    query.addQueryItem(QStringLiteral("broadcaster_id"), broadcasterId_);
+    query.addQueryItem(QStringLiteral("moderator_id"), broadcasterId_);
+    query.addQueryItem(QStringLiteral("first"), QStringLiteral("100"));
+    url.setQuery(query);
+
+    QNetworkRequest request(url);
+    request.setRawHeader("Authorization", QByteArray("Bearer ") + followerPollToken_.toUtf8());
+    request.setRawHeader("Client-Id", followerPollClientId_.toUtf8());
+
+    QNetworkReply *reply = networkManager_->get(request);
+    connect(reply, &QNetworkReply::finished, this, [this, reply, initializeSnapshot]() {
+        const QByteArray payloadBytes = reply->readAll();
+        const QNetworkReply::NetworkError error = reply->error();
+        const QString errorString = reply->errorString();
+        reply->deleteLater();
+
+        if (error != QNetworkReply::NoError) {
+            if (initializeSnapshot) {
+                appendChatSystemMessage(tr("Unable to load follow activity for chat: %1").arg(errorString));
+            }
+            return;
+        }
+
+        struct FollowerActivity {
+            QString id;
+            QString displayName;
+            QDateTime followedAt;
+        };
+
+        const QJsonObject payload = QJsonDocument::fromJson(payloadBytes).object();
+        const QJsonArray data = payload.value(QStringLiteral("data")).toArray();
+        QList<FollowerActivity> newFollowers;
+        QSet<QString> latestFollowerIds;
+        for (const QJsonValue &entryValue : data) {
+            const QJsonObject entry = entryValue.toObject();
+            const QString followerId = entry.value(QStringLiteral("user_id")).toString().trimmed();
+            if (followerId.isEmpty()) {
+                continue;
+            }
+
+            latestFollowerIds.insert(followerId);
+            if (followerSnapshotInitialized_ && knownFollowerIds_.contains(followerId)) {
+                continue;
+            }
+
+            FollowerActivity follower;
+            follower.id = followerId;
+            follower.displayName = entry.value(QStringLiteral("user_name")).toString().trimmed();
+            if (follower.displayName.isEmpty()) {
+                follower.displayName = entry.value(QStringLiteral("user_login")).toString().trimmed();
+            }
+            follower.followedAt =
+                QDateTime::fromString(entry.value(QStringLiteral("followed_at")).toString().trimmed(), Qt::ISODate);
+            newFollowers.append(follower);
+        }
+
+        if (followerSnapshotInitialized_) {
+            std::sort(newFollowers.begin(), newFollowers.end(), [](const FollowerActivity &lhs, const FollowerActivity &rhs) {
+                return lhs.followedAt < rhs.followedAt;
+            });
+            for (const FollowerActivity &follower : newFollowers) {
+                const QString timestamp = follower.followedAt.isValid()
+                                              ? follower.followedAt.toLocalTime().toString(QStringLiteral("HH:mm"))
+                                              : QTime::currentTime().toString(QStringLiteral("HH:mm"));
+                appendChatActivityMessage(
+                    timestamp, tr("%1 followed the channel.").arg(follower.displayName.isEmpty() ? tr("A viewer") : follower.displayName));
+            }
+        }
+
+        knownFollowerIds_.unite(latestFollowerIds);
+        followerSnapshotInitialized_ = true;
     });
 }
 
