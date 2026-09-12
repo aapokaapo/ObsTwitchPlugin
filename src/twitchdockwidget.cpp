@@ -1448,7 +1448,12 @@ void TwitchDockWidget::appendFormattedChatLine(const QByteArray &ircLine)
                         tr("%1 gifted a subscription to %2.")
                             .arg(actor.isEmpty() ? tr("A viewer") : actor, recipient.isEmpty() ? tr("another viewer") : recipient);
                 } else if (msgId == QStringLiteral("submysterygift") || msgId == QStringLiteral("anonsubmysterygift")) {
-                    activity = tr("%1 gifted community subscriptions.").arg(actor.isEmpty() ? tr("A viewer") : actor);
+                    const QString giftCount = ircTagValue(tags, QStringLiteral("msg-param-mass-gift-count"));
+                    activity =
+                        giftCount.isEmpty()
+                            ? tr("%1 gifted community subscriptions.").arg(actor.isEmpty() ? tr("A viewer") : actor)
+                            : tr("%1 gifted %2 community subscriptions.")
+                                  .arg(actor.isEmpty() ? tr("A viewer") : actor, giftCount);
                 } else if (msgId == QStringLiteral("giftpaidupgrade") || msgId == QStringLiteral("anongiftpaidupgrade")) {
                     const QString continuingViewer = ircTagValue(tags, QStringLiteral("msg-param-sender-name"));
                     const QString continuingViewerLogin = ircTagValue(tags, QStringLiteral("msg-param-sender-login"));
@@ -1858,9 +1863,11 @@ void TwitchDockWidget::startFollowerActivityPolling(const QString &token, const 
     followerPollToken_ = token.trimmed();
     followerPollClientId_ = clientId.trimmed();
     followerPollBroadcasterId_ = broadcasterId.trimmed();
+    followerPollModeratorId_ = this->broadcasterId_.trimmed();
     knownFollowerIds_.clear();
     newestKnownFollowerAt_ = {};
     followerSnapshotInitialized_ = false;
+    followerPollErrorShown_ = false;
     ++followerPollSessionId_;
     followerPollRequestSessionId_ = 0;
     pollLatestFollowers(true);
@@ -1876,15 +1883,17 @@ void TwitchDockWidget::stopFollowerActivityPolling()
     followerPollToken_.clear();
     followerPollClientId_.clear();
     followerPollBroadcasterId_.clear();
+    followerPollModeratorId_.clear();
     knownFollowerIds_.clear();
     newestKnownFollowerAt_ = {};
     followerSnapshotInitialized_ = false;
+    followerPollErrorShown_ = false;
 }
 
 void TwitchDockWidget::pollLatestFollowers(bool initializeSnapshot)
 {
     if (followerPollToken_.isEmpty() || followerPollClientId_.isEmpty() || followerPollBroadcasterId_.isEmpty() ||
-        broadcasterId_.isEmpty() ||
+        followerPollModeratorId_.isEmpty() ||
         followerPollRequestSessionId_ == followerPollSessionId_) {
         return;
     }
@@ -1903,7 +1912,7 @@ void TwitchDockWidget::pollLatestFollowers(bool initializeSnapshot)
         QUrl url(QStringLiteral("https://api.twitch.tv/helix/channels/followers"));
         QUrlQuery query;
         query.addQueryItem(QStringLiteral("broadcaster_id"), followerPollBroadcasterId_);
-        query.addQueryItem(QStringLiteral("moderator_id"), broadcasterId_);
+        query.addQueryItem(QStringLiteral("moderator_id"), followerPollModeratorId_);
         query.addQueryItem(QStringLiteral("first"), QStringLiteral("100"));
         if (!afterCursor.isEmpty()) {
             query.addQueryItem(QStringLiteral("after"), afterCursor);
@@ -1939,8 +1948,11 @@ void TwitchDockWidget::pollLatestFollowers(bool initializeSnapshot)
                         if (followerPollTimer_) {
                             followerPollTimer_->start();
                         }
-                        if (initializeSnapshot) {
-                            appendChatSystemMessage(tr("Unable to load follow activity for chat: %1").arg(errorString));
+                        if (!followerPollErrorShown_) {
+                            appendChatSystemMessage(initializeSnapshot
+                                                       ? tr("Unable to load follow activity for chat: %1").arg(errorString)
+                                                       : tr("Follower activity refresh failed: %1").arg(errorString));
+                            followerPollErrorShown_ = true;
                         }
                         return;
                     }
@@ -2006,6 +2018,7 @@ void TwitchDockWidget::pollLatestFollowers(bool initializeSnapshot)
                     if (followerPollTimer_) {
                         followerPollTimer_->start();
                     }
+                    followerPollErrorShown_ = false;
 
                     if (followerSnapshotInitialized_) {
                         std::sort(collectedFollowers.begin(),

@@ -181,6 +181,7 @@ private:
     QString followerPollToken_;
     QString followerPollClientId_;
     QString followerPollBroadcasterId_;
+    QString followerPollModeratorId_;
     QHash<QString, QImage> emoteImages_;
     QMap<QString, QString> customCommands_;
     QSet<QString> pendingEmoteIds_;
@@ -196,4 +197,5 @@ private:
     bool followerSnapshotInitialized_ = false;
     bool followerMissingScopeWarningShown_ = false;
     bool followerMissingClientIdWarningShown_ = false;
+    bool followerPollErrorShown_ = false;
 };
