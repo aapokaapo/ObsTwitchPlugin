@@ -1282,8 +1282,11 @@ void TwitchDockWidget::connectChat()
 
         appendChatSystemMessage(tr("Connected to Twitch IRC and joined #%1.").arg(channel));
 
-        if (scopes.contains(QStringLiteral("moderator:read:followers"))) {
-            startFollowerActivityPolling(token, clientIdEdit_->text().trimmed());
+        const QString clientId = clientIdEdit_->text().trimmed();
+        if (scopes.contains(QStringLiteral("moderator:read:followers")) && !clientId.isEmpty()) {
+            startFollowerActivityPolling(token, clientId);
+        } else if (scopes.contains(QStringLiteral("moderator:read:followers"))) {
+            appendChatSystemMessage(tr("Follower activity requires a Twitch Client ID in the authorization settings."));
         } else {
             appendChatSystemMessage(
                 tr("OAuth token is missing moderator:read:followers scope, so follow activity will not appear until you re-authorize."));
