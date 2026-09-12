@@ -2051,8 +2051,12 @@ void TwitchDockWidget::pollLatestFollowers(bool initializeSnapshot)
                         }
                     }
 
-                    newestKnownFollowerAt_ = newestSeenAt;
-                    knownFollowerIds_ = newestSeenIds;
+                    if (newestSeenAt == newestKnownFollowerAt_) {
+                        knownFollowerIds_.unite(newestSeenIds);
+                    } else {
+                        newestKnownFollowerAt_ = newestSeenAt;
+                        knownFollowerIds_ = newestSeenIds;
+                    }
                     followerSnapshotInitialized_ = true;
                 });
     };
