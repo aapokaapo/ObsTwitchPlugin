@@ -182,7 +182,9 @@ private:
     QList<PendingChatMessage> pendingChatMessages_;
     QList<LocalChatEcho> pendingLocalChatEchoes_;
     QSet<QString> knownFollowerIds_;
+    quint64 followerPollSessionId_ = 0;
     bool chatCanSendMessages_ = false;
     bool chatAutoConnectAttempted_ = false;
     bool followerSnapshotInitialized_ = false;
+    bool followerPollRequestInFlight_ = false;
 };

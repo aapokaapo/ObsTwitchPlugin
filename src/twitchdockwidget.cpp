@@ -1816,14 +1816,16 @@ void TwitchDockWidget::fetchCurrentChannelInfo()
 
 void TwitchDockWidget::startFollowerActivityPolling(const QString &token, const QString &clientId)
 {
+    if (followerPollTimer_) {
+        followerPollTimer_->stop();
+    }
     followerPollToken_ = token.trimmed();
     followerPollClientId_ = clientId.trimmed();
     knownFollowerIds_.clear();
     followerSnapshotInitialized_ = false;
+    followerPollRequestInFlight_ = false;
+    ++followerPollSessionId_;
     pollLatestFollowers(true);
-    if (followerPollTimer_) {
-        followerPollTimer_->start();
-    }
 }
 
 void TwitchDockWidget::stopFollowerActivityPolling()
@@ -1831,6 +1833,8 @@ void TwitchDockWidget::stopFollowerActivityPolling()
     if (followerPollTimer_) {
         followerPollTimer_->stop();
     }
+    followerPollRequestInFlight_ = false;
+    ++followerPollSessionId_;
     followerPollToken_.clear();
     followerPollClientId_.clear();
     knownFollowerIds_.clear();
@@ -1839,7 +1843,8 @@ void TwitchDockWidget::stopFollowerActivityPolling()
 
 void TwitchDockWidget::pollLatestFollowers(bool initializeSnapshot)
 {
-    if (followerPollToken_.isEmpty() || followerPollClientId_.isEmpty() || broadcasterId_.isEmpty()) {
+    if (followerPollToken_.isEmpty() || followerPollClientId_.isEmpty() || broadcasterId_.isEmpty() ||
+        followerPollRequestInFlight_) {
         return;
     }
 
@@ -1854,12 +1859,23 @@ void TwitchDockWidget::pollLatestFollowers(bool initializeSnapshot)
     request.setRawHeader("Authorization", QByteArray("Bearer ") + followerPollToken_.toUtf8());
     request.setRawHeader("Client-Id", followerPollClientId_.toUtf8());
 
+    followerPollRequestInFlight_ = true;
+    const quint64 sessionId = followerPollSessionId_;
     QNetworkReply *reply = networkManager_->get(request);
-    connect(reply, &QNetworkReply::finished, this, [this, reply, initializeSnapshot]() {
+    connect(reply, &QNetworkReply::finished, this, [this, reply, initializeSnapshot, sessionId]() {
         const QByteArray payloadBytes = reply->readAll();
         const QNetworkReply::NetworkError error = reply->error();
         const QString errorString = reply->errorString();
         reply->deleteLater();
+
+        if (sessionId != followerPollSessionId_) {
+            return;
+        }
+
+        followerPollRequestInFlight_ = false;
+        if (initializeSnapshot && followerPollTimer_) {
+            followerPollTimer_->start();
+        }
 
         if (error != QNetworkReply::NoError) {
             if (initializeSnapshot) {
