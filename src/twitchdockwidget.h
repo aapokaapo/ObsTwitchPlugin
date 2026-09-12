@@ -12,6 +12,7 @@
 #include <QNetworkReply>
 #include <QPushButton>
 #include <QCompleter>
+#include <QDateTime>
 #include <QSet>
 #include <QStringList>
 #include <QStringListModel>
@@ -95,6 +96,7 @@ private:
     void persistCommands() const;
     void loadPersistedCommands();
     void appendChatSystemMessage(const QString &message);
+    void appendChatActivityMessage(const QString &timestamp, const QString &message);
     void appendLocalOutgoingChatMessage(const QString &message, int commandDepth);
     bool sendChatMessage(const QString &message, int commandDepth = 0);
     void appendFormattedChatLine(const QByteArray &ircLine);
@@ -119,7 +121,14 @@ private:
     void persistClientSecret(const QString &clientSecret);
     QString loadCachedClientSecret() const;
     void fetchCurrentChannelInfo();
+    void startFollowerActivityPolling(const QString &token, const QString &clientId, const QString &broadcasterId);
+    void stopFollowerActivityPolling();
+    void pollLatestFollowers(bool initializeSnapshot);
     void fetchCategorySuggestions(const QString &query);
+    void resolveUserIdForLogin(const QString &token,
+                               const QString &clientId,
+                               const QString &login,
+                               std::function<void(const QString &)> continuation);
     void resolveCategoryId(const QString &token,
                            const QString &clientId,
                            const QString &categoryName,
@@ -162,18 +171,32 @@ private:
     QTcpSocket *chatSocket_ = nullptr;
     QNetworkAccessManager *networkManager_ = nullptr;
     QTimer *categorySuggestTimer_ = nullptr;
+    QTimer *followerPollTimer_ = nullptr;
     QNetworkReply *categorySuggestReply_ = nullptr;
 
     QString broadcasterId_;
     QString twitchLogin_;
     QString validatedToken_;
     QSet<QString> validatedScopes_;
+    QString followerPollToken_;
+    QString followerPollClientId_;
+    QString followerPollBroadcasterId_;
+    QString followerPollModeratorId_;
     QHash<QString, QImage> emoteImages_;
     QMap<QString, QString> customCommands_;
     QSet<QString> pendingEmoteIds_;
     QSet<QString> unavailableEmoteIds_;
     QList<PendingChatMessage> pendingChatMessages_;
     QList<LocalChatEcho> pendingLocalChatEchoes_;
+    QSet<QString> knownFollowerIds_;
+    QDateTime newestKnownFollowerAt_;
+    quint64 followerPollSessionId_ = 0;
+    quint64 followerPollRequestSessionId_ = 0;
     bool chatCanSendMessages_ = false;
     bool chatAutoConnectAttempted_ = false;
+    bool followerSnapshotInitialized_ = false;
+    bool followerMissingScopeWarningShown_ = false;
+    bool followerMissingClientIdWarningShown_ = false;
+    bool followerPollErrorShown_ = false;
+    bool followerPollRequestInFlight_ = false;
 };

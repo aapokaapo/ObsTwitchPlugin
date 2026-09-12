@@ -10,8 +10,8 @@ Before the plugin can update channel info or connect to Twitch chat, create a Tw
 2. Create an app or use an existing app.
 3. Add `http://localhost:38471` as an OAuth Redirect URL for the app.
 4. Copy the app's Client ID and Client Secret into the plugin's **Stream Info** tab.
-5. Click **Authorize in Browser** in the plugin and approve the requested scopes, including `channel:manage:broadcast`, `chat:read`, and `chat:edit`.
-6. After Twitch redirects back to OBS, the plugin caches the returned OAuth token and uses it for chat and channel updates.
+5. Click **Authorize in Browser** in the plugin and approve the requested scopes, including `channel:manage:broadcast`, `chat:read`, `chat:edit`, and `moderator:read:followers`.
+6. After Twitch redirects back to OBS, the plugin caches the returned OAuth token and uses it for chat, follower activity, and channel updates.
 
 ## Build instructions
 

@@ -38,6 +38,7 @@
 #include <QVBoxLayout>
 
 #include <algorithm>
+#include <memory>
 #include <optional>
 
 extern "C" {
@@ -64,6 +65,7 @@ constexpr auto kDefaultChatColor = "#bf94ff";
 constexpr auto kChatMessageTextColor = "#efeff1";
 constexpr int kCategorySuggestionLimit = 20;
 constexpr qint64 kPendingEmoteWaitTimeoutMs = 5000;
+constexpr int kFollowerPollIntervalMs = 30000;
 constexpr int kMaxTwitchChatMessageLength = 500;
 constexpr int kMaxCommandChainDepth = 16;
 
@@ -85,6 +87,7 @@ const QStringList &requiredOAuthScopes()
         QStringLiteral("channel:manage:broadcast"),
         QStringLiteral("chat:read"),
         QStringLiteral("chat:edit"),
+        QStringLiteral("moderator:read:followers"),
     };
     return scopes;
 }
@@ -113,7 +116,39 @@ QString ircTagValue(const QString &tags, const QString &key)
         if (!part.startsWith(prefix)) {
             continue;
         }
-        return part.mid(prefix.size());
+
+        const QString rawValue = part.mid(prefix.size());
+        QString decodedValue;
+        decodedValue.reserve(rawValue.size());
+        for (int index = 0; index < rawValue.size(); ++index) {
+            if (rawValue.at(index) != QLatin1Char('\\') || index + 1 >= rawValue.size()) {
+                decodedValue.append(rawValue.at(index));
+                continue;
+            }
+
+            ++index;
+            switch (rawValue.at(index).unicode()) {
+            case 's':
+                decodedValue.append(QLatin1Char(' '));
+                break;
+            case ':':
+                decodedValue.append(QLatin1Char(';'));
+                break;
+            case 'r':
+                decodedValue.append(QLatin1Char('\r'));
+                break;
+            case 'n':
+                decodedValue.append(QLatin1Char('\n'));
+                break;
+            case '\\':
+                decodedValue.append(QLatin1Char('\\'));
+                break;
+            default:
+                decodedValue.append(rawValue.at(index));
+                break;
+            }
+        }
+        return decodedValue;
     }
     return {};
 }
@@ -143,6 +178,12 @@ QUrl emoteResourceUrl(const QString &emoteId)
 {
     return QUrl(QStringLiteral("twitch-emote://%1").arg(emoteId));
 }
+
+struct FollowerActivityRecord {
+    QString id;
+    QString displayName;
+    QDateTime followedAt;
+};
 
 class CommandDialog final : public QDialog {
 public:
@@ -228,12 +269,17 @@ TwitchDockWidget::TwitchDockWidget(QWidget *parent)
 
     connect(oauthServer_, &QTcpServer::newConnection, this, &TwitchDockWidget::onOAuthServerConnection);
     connect(chatSocket_, &QTcpSocket::readyRead, this, &TwitchDockWidget::onChatSocketReadyRead);
+    connect(chatSocket_, &QTcpSocket::disconnected, this, [this]() { stopFollowerActivityPolling(); });
     categorySuggestTimer_ = new QTimer(this);
     categorySuggestTimer_->setSingleShot(true);
     categorySuggestTimer_->setInterval(250);
     connect(categorySuggestTimer_, &QTimer::timeout, this, [this]() {
         fetchCategorySuggestions(gameIdEdit_->text().trimmed());
     });
+    followerPollTimer_ = new QTimer(this);
+    followerPollTimer_->setSingleShot(true);
+    followerPollTimer_->setInterval(kFollowerPollIntervalMs);
+    connect(followerPollTimer_, &QTimer::timeout, this, [this]() { pollLatestFollowers(false); });
 
     loadPersistedUiState();
     loadPersistedCommands();
@@ -249,6 +295,8 @@ TwitchDockWidget::~TwitchDockWidget()
     if (chatSocket_) {
         chatSocket_->abort();
     }
+
+    stopFollowerActivityPolling();
 }
 
 void TwitchDockWidget::buildUi()
@@ -328,7 +376,7 @@ void TwitchDockWidget::buildUi()
     tokenEdit_ = new QLineEdit(streamTab);
     tokenEdit_->setEchoMode(QLineEdit::Password);
     auto *oauthHelpLabel = new QLabel(
-        tr("Create a Twitch app in the Developer Console, add redirect URL %1, paste the Client ID and Client Secret here, then click Authorize in Browser to grant channel update plus chat read/write access.")
+        tr("Create a Twitch app in the Developer Console, add redirect URL %1, paste the Client ID and Client Secret here, then click Authorize in Browser to grant channel update, chat read/write, and follower activity access.")
             .arg(oauthRedirectUrl()),
         nullptr);
     oauthHelpLabel->setWordWrap(true);
@@ -1199,6 +1247,7 @@ void TwitchDockWidget::connectChat()
 {
     const QString token = tokenEdit_->text().trimmed();
     chatCanSendMessages_ = false;
+    stopFollowerActivityPolling();
     if (token.isEmpty()) {
         appendChatSystemMessage(tr("Chat connection requires an OAuth token with chat:read scope and chat:edit for command responses."));
         return;
@@ -1240,6 +1289,39 @@ void TwitchDockWidget::connectChat()
         chatSocket_->write("JOIN #" + channel.toUtf8() + "\r\n");
 
         appendChatSystemMessage(tr("Connected to Twitch IRC and joined #%1.").arg(channel));
+
+        const QString clientId = clientIdEdit_->text().trimmed();
+        if (scopes.contains(QStringLiteral("moderator:read:followers")) && !clientId.isEmpty()) {
+            followerMissingScopeWarningShown_ = false;
+            followerMissingClientIdWarningShown_ = false;
+            if (channel.compare(twitchLogin_, Qt::CaseInsensitive) == 0) {
+                startFollowerActivityPolling(token, clientId, broadcasterId_);
+            } else {
+                QPointer<QTcpSocket> trackedChatSocket(chatSocket_);
+                resolveUserIdForLogin(token, clientId, channel, [this, trackedChatSocket, token, clientId, channel](const QString &channelBroadcasterId) {
+                    if (!trackedChatSocket || trackedChatSocket->state() != QAbstractSocket::ConnectedState ||
+                        sanitizeChannelLogin(channelEdit_->text()) != channel || validatedToken_ != token) {
+                        return;
+                    }
+                    if (channelBroadcasterId.isEmpty()) {
+                        appendChatSystemMessage(tr("Unable to resolve the joined channel for follower activity."));
+                        return;
+                    }
+                    startFollowerActivityPolling(token, clientId, channelBroadcasterId);
+                });
+            }
+        } else if (scopes.contains(QStringLiteral("moderator:read:followers"))) {
+            if (!followerMissingClientIdWarningShown_) {
+                appendChatSystemMessage(tr("Follower activity requires a Twitch Client ID in the authorization settings."));
+                followerMissingClientIdWarningShown_ = true;
+            }
+        } else {
+            if (!followerMissingScopeWarningShown_) {
+                appendChatSystemMessage(
+                    tr("OAuth token is missing moderator:read:followers scope, so follow activity will not appear until you re-authorize."));
+                followerMissingScopeWarningShown_ = true;
+            }
+        }
     });
 }
 
@@ -1275,6 +1357,18 @@ void TwitchDockWidget::appendChatSystemMessage(const QString &message)
     ensureChatEntryStartsOnNewLine(cursor);
     cursor.insertHtml(QStringLiteral("<span style='color:#adadb8;'>[system]</span> <span style='color:#d3d3da;'>%1</span>")
                           .arg(message.toHtmlEscaped()));
+    cursor.insertBlock();
+    chatText_->setTextCursor(cursor);
+}
+
+void TwitchDockWidget::appendChatActivityMessage(const QString &timestamp, const QString &message)
+{
+    chatText_->moveCursor(QTextCursor::End);
+    QTextCursor cursor = chatText_->textCursor();
+    ensureChatEntryStartsOnNewLine(cursor);
+    cursor.insertHtml(QStringLiteral("<span style='color:#8f8fa3;'>%1</span> <span style='color:#00d084;'>[activity]</span> "
+                                     "<span style='color:#efeff1;'>%2</span>")
+                          .arg(timestamp.toHtmlEscaped(), message.toHtmlEscaped()));
     cursor.insertBlock();
     chatText_->setTextCursor(cursor);
 }
@@ -1327,6 +1421,68 @@ void TwitchDockWidget::appendFormattedChatLine(const QByteArray &ircLine)
                            commandResponse,
                            0);
         return;
+    }
+
+    static const QRegularExpression userNoticePattern(
+        QStringLiteral("^@([^\\s]+)\\s+:tmi\\.twitch\\.tv\\s+USERNOTICE\\s+#[^\\s]+(?:\\s+:(.*))?$"));
+    const QRegularExpressionMatch userNoticeMatch = userNoticePattern.match(line);
+    if (userNoticeMatch.hasMatch()) {
+        const QString tags = userNoticeMatch.captured(1);
+        const QString msgId = ircTagValue(tags, QStringLiteral("msg-id"));
+        const QSet<QString> supportedNoticeIds = {
+            QStringLiteral("sub"),          QStringLiteral("resub"),        QStringLiteral("subgift"),
+            QStringLiteral("anonsubgift"),  QStringLiteral("submysterygift"), QStringLiteral("anonsubmysterygift"),
+            QStringLiteral("giftpaidupgrade"), QStringLiteral("anongiftpaidupgrade"),
+            QStringLiteral("primepaidupgrade"), QStringLiteral("raid"),
+        };
+        if (supportedNoticeIds.contains(msgId)) {
+            QString activity = ircTagValue(tags, QStringLiteral("system-msg")).trimmed();
+            if (activity.isEmpty()) {
+                const QString actor = ircTagValue(tags, QStringLiteral("display-name"));
+                const QString recipient = ircTagValue(tags, QStringLiteral("msg-param-recipient-display-name"));
+                const QString raidViewerCount = ircTagValue(tags, QStringLiteral("msg-param-viewerCount"));
+                if (msgId == QStringLiteral("sub") || msgId == QStringLiteral("resub") ||
+                    msgId == QStringLiteral("primepaidupgrade")) {
+                    activity = tr("%1 subscribed.").arg(actor.isEmpty() ? tr("A viewer") : actor);
+                } else if (msgId == QStringLiteral("subgift") || msgId == QStringLiteral("anonsubgift")) {
+                    const QString gifter =
+                        msgId == QStringLiteral("anonsubgift") ? tr("An anonymous gifter")
+                                                               : (actor.isEmpty() ? tr("A viewer") : actor);
+                    activity =
+                        tr("%1 gifted a subscription to %2.").arg(gifter,
+                                                                   recipient.isEmpty() ? tr("another viewer") : recipient);
+                } else if (msgId == QStringLiteral("submysterygift") || msgId == QStringLiteral("anonsubmysterygift")) {
+                    const QString giftCount = ircTagValue(tags, QStringLiteral("msg-param-mass-gift-count"));
+                    const QString gifter =
+                        msgId == QStringLiteral("anonsubmysterygift") ? tr("An anonymous gifter")
+                                                                      : (actor.isEmpty() ? tr("A viewer") : actor);
+                    activity =
+                        giftCount.isEmpty() ? tr("%1 gifted community subscriptions.").arg(gifter)
+                                            : tr("%1 gifted %2 community subscriptions.").arg(gifter, giftCount);
+                } else if (msgId == QStringLiteral("giftpaidupgrade") || msgId == QStringLiteral("anongiftpaidupgrade")) {
+                    const QString continuingViewer = ircTagValue(tags, QStringLiteral("msg-param-sender-name"));
+                    const QString continuingViewerLogin = ircTagValue(tags, QStringLiteral("msg-param-sender-login"));
+                    activity =
+                        tr("%1 continued a gifted subscription.")
+                            .arg(!continuingViewer.isEmpty() ? continuingViewer
+                                                             : (continuingViewerLogin.isEmpty() ? tr("A viewer")
+                                                                                                : continuingViewerLogin));
+                } else if (msgId == QStringLiteral("raid")) {
+                    activity = tr("%1 is raiding with a party of %2.")
+                                   .arg(actor.isEmpty() ? tr("A channel") : actor,
+                                        raidViewerCount.isEmpty() ? tr("unknown size") : raidViewerCount);
+                }
+            }
+
+            const QString userMessage = userNoticeMatch.captured(2).trimmed();
+            if (!userMessage.isEmpty()) {
+                activity += tr(" — %1").arg(userMessage);
+            }
+            if (!activity.isEmpty()) {
+                appendChatActivityMessage(timestamp, activity);
+            }
+            return;
+        }
     }
 
     static const QRegularExpression noticePattern(QStringLiteral("NOTICE\\s+#[^\\s]+\\s+:(.*)$"));
@@ -1701,6 +1857,251 @@ void TwitchDockWidget::fetchCurrentChannelInfo()
                 tr("Loaded current stream info from Twitch (title and game%1).")
                     .arg(gameName.isEmpty() ? QString() : QStringLiteral(": %1").arg(gameName)));
         });
+    });
+}
+
+void TwitchDockWidget::startFollowerActivityPolling(const QString &token, const QString &clientId, const QString &broadcasterId)
+{
+    if (followerPollTimer_) {
+        followerPollTimer_->stop();
+    }
+    followerPollToken_ = token.trimmed();
+    followerPollClientId_ = clientId.trimmed();
+    followerPollBroadcasterId_ = broadcasterId.trimmed();
+    followerPollModeratorId_ = this->broadcasterId_.trimmed();
+    knownFollowerIds_.clear();
+    newestKnownFollowerAt_ = {};
+    followerSnapshotInitialized_ = false;
+    followerPollErrorShown_ = false;
+    followerPollRequestInFlight_ = false;
+    ++followerPollSessionId_;
+    followerPollRequestSessionId_ = 0;
+    pollLatestFollowers(true);
+}
+
+void TwitchDockWidget::stopFollowerActivityPolling()
+{
+    if (followerPollTimer_) {
+        followerPollTimer_->stop();
+    }
+    ++followerPollSessionId_;
+    followerPollRequestSessionId_ = 0;
+    followerPollToken_.clear();
+    followerPollClientId_.clear();
+    followerPollBroadcasterId_.clear();
+    followerPollModeratorId_.clear();
+    knownFollowerIds_.clear();
+    newestKnownFollowerAt_ = {};
+    followerSnapshotInitialized_ = false;
+    followerPollErrorShown_ = false;
+    followerPollRequestInFlight_ = false;
+}
+
+void TwitchDockWidget::pollLatestFollowers(bool initializeSnapshot)
+{
+    if (followerPollToken_.isEmpty() || followerPollClientId_.isEmpty() || followerPollBroadcasterId_.isEmpty() ||
+        followerPollModeratorId_.isEmpty() || followerPollRequestInFlight_) {
+        return;
+    }
+
+    const quint64 sessionId = followerPollSessionId_;
+    followerPollRequestInFlight_ = true;
+    followerPollRequestSessionId_ = sessionId;
+
+    auto fetchPage = std::make_shared<std::function<void(const QString &,
+                                                         QList<FollowerActivityRecord>,
+                                                         QDateTime,
+                                                         QSet<QString>)>>();
+    *fetchPage = [this, initializeSnapshot, sessionId, fetchPage](const QString &afterCursor,
+                                                                  QList<FollowerActivityRecord> collectedFollowers,
+                                                                  QDateTime newestSeenAt,
+                                                                  QSet<QString> newestSeenIds) mutable {
+        QUrl url(QStringLiteral("https://api.twitch.tv/helix/channels/followers"));
+        QUrlQuery query;
+        query.addQueryItem(QStringLiteral("broadcaster_id"), followerPollBroadcasterId_);
+        query.addQueryItem(QStringLiteral("moderator_id"), followerPollModeratorId_);
+        query.addQueryItem(QStringLiteral("first"), QStringLiteral("100"));
+        if (!afterCursor.isEmpty()) {
+            query.addQueryItem(QStringLiteral("after"), afterCursor);
+        }
+        url.setQuery(query);
+
+        QNetworkRequest request(url);
+        request.setRawHeader("Authorization", QByteArray("Bearer ") + followerPollToken_.toUtf8());
+        request.setRawHeader("Client-Id", followerPollClientId_.toUtf8());
+
+        QNetworkReply *reply = networkManager_->get(request);
+        connect(reply,
+                &QNetworkReply::finished,
+                this,
+                [this, reply, initializeSnapshot, sessionId, fetchPage, collectedFollowers = std::move(collectedFollowers),
+                 newestSeenAt, newestSeenIds = std::move(newestSeenIds)]() mutable {
+                    const QByteArray payloadBytes = reply->readAll();
+                    const QNetworkReply::NetworkError error = reply->error();
+                    const QString errorString = reply->errorString();
+                    reply->deleteLater();
+
+                    if (sessionId != followerPollSessionId_) {
+                        if (followerPollRequestSessionId_ == sessionId) {
+                            followerPollRequestInFlight_ = false;
+                            followerPollRequestSessionId_ = 0;
+                        }
+                        return;
+                    }
+
+                    if (error != QNetworkReply::NoError) {
+                        if (followerPollRequestSessionId_ == sessionId) {
+                            followerPollRequestInFlight_ = false;
+                            followerPollRequestSessionId_ = 0;
+                        }
+                        if (followerPollTimer_) {
+                            followerPollTimer_->start();
+                        }
+                        if (!followerPollErrorShown_) {
+                            appendChatSystemMessage(initializeSnapshot
+                                                       ? tr("Unable to load follow activity for chat: %1").arg(errorString)
+                                                       : tr("Follower activity refresh failed: %1").arg(errorString));
+                            followerPollErrorShown_ = true;
+                        }
+                        return;
+                    }
+
+                    const QJsonObject payload = QJsonDocument::fromJson(payloadBytes).object();
+                    const QJsonArray data = payload.value(QStringLiteral("data")).toArray();
+                    QDateTime oldestSeenAtInPage;
+                    for (const QJsonValue &entryValue : data) {
+                        const QJsonObject entry = entryValue.toObject();
+                        const QString followerId = entry.value(QStringLiteral("user_id")).toString().trimmed();
+                        if (followerId.isEmpty()) {
+                            continue;
+                        }
+
+                        FollowerActivityRecord follower;
+                        follower.id = followerId;
+                        follower.displayName = entry.value(QStringLiteral("user_name")).toString().trimmed();
+                        if (follower.displayName.isEmpty()) {
+                            follower.displayName = entry.value(QStringLiteral("user_login")).toString().trimmed();
+                        }
+                        follower.followedAt =
+                            QDateTime::fromString(entry.value(QStringLiteral("followed_at")).toString().trimmed(), Qt::ISODate);
+
+                        if (!newestSeenAt.isValid() || (follower.followedAt.isValid() && follower.followedAt > newestSeenAt)) {
+                            newestSeenAt = follower.followedAt;
+                            newestSeenIds.clear();
+                            newestSeenIds.insert(follower.id);
+                        } else if (follower.followedAt.isValid() && follower.followedAt == newestSeenAt) {
+                            newestSeenIds.insert(follower.id);
+                        }
+
+                        if (follower.followedAt.isValid()) {
+                            oldestSeenAtInPage = follower.followedAt;
+                        }
+
+                        const bool isNewFollower =
+                            followerSnapshotInitialized_ && follower.followedAt.isValid() &&
+                            (!newestKnownFollowerAt_.isValid() || follower.followedAt > newestKnownFollowerAt_ ||
+                             (follower.followedAt.isValid() && follower.followedAt == newestKnownFollowerAt_ &&
+                              !knownFollowerIds_.contains(follower.id)));
+                        if (isNewFollower) {
+                            collectedFollowers.append(follower);
+                        }
+                    }
+
+                    const QString nextCursor =
+                        payload.value(QStringLiteral("pagination")).toObject().value(QStringLiteral("cursor")).toString().trimmed();
+                    const bool shouldFetchNextPage =
+                        !initializeSnapshot && !nextCursor.isEmpty() &&
+                        (!newestKnownFollowerAt_.isValid() ||
+                         (oldestSeenAtInPage.isValid() && oldestSeenAtInPage >= newestKnownFollowerAt_));
+                    if (shouldFetchNextPage) {
+                        (*fetchPage)(nextCursor,
+                                     std::move(collectedFollowers),
+                                     newestSeenAt,
+                                     std::move(newestSeenIds));
+                        return;
+                    }
+
+                    if (followerPollRequestSessionId_ == sessionId) {
+                        followerPollRequestInFlight_ = false;
+                        followerPollRequestSessionId_ = 0;
+                    }
+                    if (followerPollTimer_) {
+                        followerPollTimer_->start();
+                    }
+                    followerPollErrorShown_ = false;
+
+                    if (!newestSeenAt.isValid()) {
+                        return;
+                    }
+
+                    if (followerSnapshotInitialized_) {
+                        std::sort(collectedFollowers.begin(),
+                                  collectedFollowers.end(),
+                                  [](const FollowerActivityRecord &lhs, const FollowerActivityRecord &rhs) {
+                                      return lhs.followedAt < rhs.followedAt;
+                                  });
+                        for (const FollowerActivityRecord &follower : collectedFollowers) {
+                            const QString timestamp = follower.followedAt.isValid()
+                                                          ? follower.followedAt.toLocalTime().toString(QStringLiteral("HH:mm"))
+                                                          : QTime::currentTime().toString(QStringLiteral("HH:mm"));
+                            appendChatActivityMessage(
+                                timestamp,
+                                tr("%1 followed the channel.").arg(follower.displayName.isEmpty() ? tr("A viewer")
+                                                                                                   : follower.displayName));
+                        }
+                    }
+
+                    if (newestSeenAt == newestKnownFollowerAt_) {
+                        knownFollowerIds_.unite(newestSeenIds);
+                    } else {
+                        newestKnownFollowerAt_ = newestSeenAt;
+                        knownFollowerIds_ = newestSeenIds;
+                    }
+                    followerSnapshotInitialized_ = true;
+                });
+    };
+
+    (*fetchPage)({}, {}, {}, {});
+}
+
+void TwitchDockWidget::resolveUserIdForLogin(const QString &token,
+                                             const QString &clientId,
+                                             const QString &login,
+                                             std::function<void(const QString &)> continuation)
+{
+    const QString trimmedLogin = sanitizeChannelLogin(login);
+    if (trimmedLogin.isEmpty()) {
+        continuation({});
+        return;
+    }
+
+    QUrl url(QStringLiteral("https://api.twitch.tv/helix/users"));
+    QUrlQuery query;
+    query.addQueryItem(QStringLiteral("login"), trimmedLogin);
+    url.setQuery(query);
+
+    QNetworkRequest request(url);
+    request.setRawHeader("Authorization", QByteArray("Bearer ") + token.toUtf8());
+    request.setRawHeader("Client-Id", clientId.toUtf8());
+
+    QNetworkReply *reply = networkManager_->get(request);
+    connect(reply, &QNetworkReply::finished, this, [reply, continuation = std::move(continuation)]() mutable {
+        const QByteArray payloadBytes = reply->readAll();
+        const QNetworkReply::NetworkError error = reply->error();
+        reply->deleteLater();
+
+        if (error != QNetworkReply::NoError) {
+            continuation({});
+            return;
+        }
+
+        const QJsonArray data = QJsonDocument::fromJson(payloadBytes).object().value(QStringLiteral("data")).toArray();
+        if (data.isEmpty()) {
+            continuation({});
+            return;
+        }
+
+        continuation(data.first().toObject().value(QStringLiteral("id")).toString().trimmed());
     });
 }
 
