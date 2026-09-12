@@ -198,4 +198,5 @@ private:
     bool followerMissingScopeWarningShown_ = false;
     bool followerMissingClientIdWarningShown_ = false;
     bool followerPollErrorShown_ = false;
+    bool followerPollRequestInFlight_ = false;
 };

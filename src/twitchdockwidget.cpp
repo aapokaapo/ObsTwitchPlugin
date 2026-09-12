@@ -1444,16 +1444,20 @@ void TwitchDockWidget::appendFormattedChatLine(const QByteArray &ircLine)
                     msgId == QStringLiteral("primepaidupgrade")) {
                     activity = tr("%1 subscribed.").arg(actor.isEmpty() ? tr("A viewer") : actor);
                 } else if (msgId == QStringLiteral("subgift") || msgId == QStringLiteral("anonsubgift")) {
+                    const QString gifter =
+                        msgId == QStringLiteral("anonsubgift") ? tr("An anonymous gifter")
+                                                               : (actor.isEmpty() ? tr("A viewer") : actor);
                     activity =
-                        tr("%1 gifted a subscription to %2.")
-                            .arg(actor.isEmpty() ? tr("A viewer") : actor, recipient.isEmpty() ? tr("another viewer") : recipient);
+                        tr("%1 gifted a subscription to %2.").arg(gifter,
+                                                                   recipient.isEmpty() ? tr("another viewer") : recipient);
                 } else if (msgId == QStringLiteral("submysterygift") || msgId == QStringLiteral("anonsubmysterygift")) {
                     const QString giftCount = ircTagValue(tags, QStringLiteral("msg-param-mass-gift-count"));
+                    const QString gifter =
+                        msgId == QStringLiteral("anonsubmysterygift") ? tr("An anonymous gifter")
+                                                                      : (actor.isEmpty() ? tr("A viewer") : actor);
                     activity =
-                        giftCount.isEmpty()
-                            ? tr("%1 gifted community subscriptions.").arg(actor.isEmpty() ? tr("A viewer") : actor)
-                            : tr("%1 gifted %2 community subscriptions.")
-                                  .arg(actor.isEmpty() ? tr("A viewer") : actor, giftCount);
+                        giftCount.isEmpty() ? tr("%1 gifted community subscriptions.").arg(gifter)
+                                            : tr("%1 gifted %2 community subscriptions.").arg(gifter, giftCount);
                 } else if (msgId == QStringLiteral("giftpaidupgrade") || msgId == QStringLiteral("anongiftpaidupgrade")) {
                     const QString continuingViewer = ircTagValue(tags, QStringLiteral("msg-param-sender-name"));
                     const QString continuingViewerLogin = ircTagValue(tags, QStringLiteral("msg-param-sender-login"));
@@ -1868,6 +1872,7 @@ void TwitchDockWidget::startFollowerActivityPolling(const QString &token, const 
     newestKnownFollowerAt_ = {};
     followerSnapshotInitialized_ = false;
     followerPollErrorShown_ = false;
+    followerPollRequestInFlight_ = false;
     ++followerPollSessionId_;
     followerPollRequestSessionId_ = 0;
     pollLatestFollowers(true);
@@ -1888,17 +1893,18 @@ void TwitchDockWidget::stopFollowerActivityPolling()
     newestKnownFollowerAt_ = {};
     followerSnapshotInitialized_ = false;
     followerPollErrorShown_ = false;
+    followerPollRequestInFlight_ = false;
 }
 
 void TwitchDockWidget::pollLatestFollowers(bool initializeSnapshot)
 {
     if (followerPollToken_.isEmpty() || followerPollClientId_.isEmpty() || followerPollBroadcasterId_.isEmpty() ||
-        followerPollModeratorId_.isEmpty() ||
-        followerPollRequestSessionId_ == followerPollSessionId_) {
+        followerPollModeratorId_.isEmpty() || followerPollRequestInFlight_) {
         return;
     }
 
     const quint64 sessionId = followerPollSessionId_;
+    followerPollRequestInFlight_ = true;
     followerPollRequestSessionId_ = sessionId;
 
     auto fetchPage = std::make_shared<std::function<void(const QString &,
@@ -1936,6 +1942,7 @@ void TwitchDockWidget::pollLatestFollowers(bool initializeSnapshot)
 
                     if (sessionId != followerPollSessionId_) {
                         if (followerPollRequestSessionId_ == sessionId) {
+                            followerPollRequestInFlight_ = false;
                             followerPollRequestSessionId_ = 0;
                         }
                         return;
@@ -1943,6 +1950,7 @@ void TwitchDockWidget::pollLatestFollowers(bool initializeSnapshot)
 
                     if (error != QNetworkReply::NoError) {
                         if (followerPollRequestSessionId_ == sessionId) {
+                            followerPollRequestInFlight_ = false;
                             followerPollRequestSessionId_ = 0;
                         }
                         if (followerPollTimer_) {
@@ -2013,6 +2021,7 @@ void TwitchDockWidget::pollLatestFollowers(bool initializeSnapshot)
                     }
 
                     if (followerPollRequestSessionId_ == sessionId) {
+                        followerPollRequestInFlight_ = false;
                         followerPollRequestSessionId_ = 0;
                     }
                     if (followerPollTimer_) {
