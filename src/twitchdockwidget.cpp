@@ -1297,8 +1297,9 @@ void TwitchDockWidget::connectChat()
             if (channel.compare(twitchLogin_, Qt::CaseInsensitive) == 0) {
                 startFollowerActivityPolling(token, clientId, broadcasterId_);
             } else {
-                resolveUserIdForLogin(token, clientId, channel, [this, token, clientId, channel](const QString &channelBroadcasterId) {
-                    if (chatSocket_->state() != QAbstractSocket::ConnectedState ||
+                QPointer<QTcpSocket> trackedChatSocket(chatSocket_);
+                resolveUserIdForLogin(token, clientId, channel, [this, trackedChatSocket, token, clientId, channel](const QString &channelBroadcasterId) {
+                    if (!trackedChatSocket || trackedChatSocket->state() != QAbstractSocket::ConnectedState ||
                         sanitizeChannelLogin(channelEdit_->text()) != channel || validatedToken_ != token) {
                         return;
                     }
@@ -1997,7 +1998,7 @@ void TwitchDockWidget::pollLatestFollowers(bool initializeSnapshot)
                         }
 
                         const bool isNewFollower =
-                            followerSnapshotInitialized_ &&
+                            followerSnapshotInitialized_ && follower.followedAt.isValid() &&
                             (!newestKnownFollowerAt_.isValid() || follower.followedAt > newestKnownFollowerAt_ ||
                              (follower.followedAt.isValid() && follower.followedAt == newestKnownFollowerAt_ &&
                               !knownFollowerIds_.contains(follower.id)));
@@ -2029,6 +2030,10 @@ void TwitchDockWidget::pollLatestFollowers(bool initializeSnapshot)
                     }
                     followerPollErrorShown_ = false;
 
+                    if (!newestSeenAt.isValid()) {
+                        return;
+                    }
+
                     if (followerSnapshotInitialized_) {
                         std::sort(collectedFollowers.begin(),
                                   collectedFollowers.end(),
@@ -2046,10 +2051,8 @@ void TwitchDockWidget::pollLatestFollowers(bool initializeSnapshot)
                         }
                     }
 
-                    if (newestSeenAt.isValid()) {
-                        newestKnownFollowerAt_ = newestSeenAt;
-                        knownFollowerIds_ = newestSeenIds;
-                    }
+                    newestKnownFollowerAt_ = newestSeenAt;
+                    knownFollowerIds_ = newestSeenIds;
                     followerSnapshotInitialized_ = true;
                 });
     };
