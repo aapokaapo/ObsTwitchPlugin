@@ -277,6 +277,7 @@ TwitchDockWidget::TwitchDockWidget(QWidget *parent)
         fetchCategorySuggestions(gameIdEdit_->text().trimmed());
     });
     followerPollTimer_ = new QTimer(this);
+    followerPollTimer_->setSingleShot(true);
     followerPollTimer_->setInterval(kFollowerPollIntervalMs);
     connect(followerPollTimer_, &QTimer::timeout, this, [this]() { pollLatestFollowers(false); });
 
@@ -1293,7 +1294,21 @@ void TwitchDockWidget::connectChat()
         if (scopes.contains(QStringLiteral("moderator:read:followers")) && !clientId.isEmpty()) {
             followerMissingScopeWarningShown_ = false;
             followerMissingClientIdWarningShown_ = false;
-            startFollowerActivityPolling(token, clientId);
+            if (channel.compare(twitchLogin_, Qt::CaseInsensitive) == 0) {
+                startFollowerActivityPolling(token, clientId, broadcasterId_);
+            } else {
+                resolveUserIdForLogin(token, clientId, channel, [this, token, clientId, channel](const QString &channelBroadcasterId) {
+                    if (chatSocket_->state() != QAbstractSocket::ConnectedState ||
+                        sanitizeChannelLogin(channelEdit_->text()) != channel || validatedToken_ != token) {
+                        return;
+                    }
+                    if (channelBroadcasterId.isEmpty()) {
+                        appendChatSystemMessage(tr("Unable to resolve the joined channel for follower activity."));
+                        return;
+                    }
+                    startFollowerActivityPolling(token, clientId, channelBroadcasterId);
+                });
+            }
         } else if (scopes.contains(QStringLiteral("moderator:read:followers"))) {
             if (!followerMissingClientIdWarningShown_) {
                 appendChatSystemMessage(tr("Follower activity requires a Twitch Client ID in the authorization settings."));
@@ -1835,13 +1850,14 @@ void TwitchDockWidget::fetchCurrentChannelInfo()
     });
 }
 
-void TwitchDockWidget::startFollowerActivityPolling(const QString &token, const QString &clientId)
+void TwitchDockWidget::startFollowerActivityPolling(const QString &token, const QString &clientId, const QString &broadcasterId)
 {
     if (followerPollTimer_) {
         followerPollTimer_->stop();
     }
     followerPollToken_ = token.trimmed();
     followerPollClientId_ = clientId.trimmed();
+    followerPollBroadcasterId_ = broadcasterId.trimmed();
     knownFollowerIds_.clear();
     newestKnownFollowerAt_ = {};
     followerSnapshotInitialized_ = false;
@@ -1859,6 +1875,7 @@ void TwitchDockWidget::stopFollowerActivityPolling()
     followerPollRequestSessionId_ = 0;
     followerPollToken_.clear();
     followerPollClientId_.clear();
+    followerPollBroadcasterId_.clear();
     knownFollowerIds_.clear();
     newestKnownFollowerAt_ = {};
     followerSnapshotInitialized_ = false;
@@ -1866,7 +1883,8 @@ void TwitchDockWidget::stopFollowerActivityPolling()
 
 void TwitchDockWidget::pollLatestFollowers(bool initializeSnapshot)
 {
-    if (followerPollToken_.isEmpty() || followerPollClientId_.isEmpty() || broadcasterId_.isEmpty() ||
+    if (followerPollToken_.isEmpty() || followerPollClientId_.isEmpty() || followerPollBroadcasterId_.isEmpty() ||
+        broadcasterId_.isEmpty() ||
         followerPollRequestSessionId_ == followerPollSessionId_) {
         return;
     }
@@ -1884,7 +1902,7 @@ void TwitchDockWidget::pollLatestFollowers(bool initializeSnapshot)
                                                                   QSet<QString> newestSeenIds) mutable {
         QUrl url(QStringLiteral("https://api.twitch.tv/helix/channels/followers"));
         QUrlQuery query;
-        query.addQueryItem(QStringLiteral("broadcaster_id"), broadcasterId_);
+        query.addQueryItem(QStringLiteral("broadcaster_id"), followerPollBroadcasterId_);
         query.addQueryItem(QStringLiteral("moderator_id"), broadcasterId_);
         query.addQueryItem(QStringLiteral("first"), QStringLiteral("100"));
         if (!afterCursor.isEmpty()) {
@@ -1918,7 +1936,7 @@ void TwitchDockWidget::pollLatestFollowers(bool initializeSnapshot)
                         if (followerPollRequestSessionId_ == sessionId) {
                             followerPollRequestSessionId_ = 0;
                         }
-                        if (initializeSnapshot && followerPollTimer_) {
+                        if (followerPollTimer_) {
                             followerPollTimer_->start();
                         }
                         if (initializeSnapshot) {
@@ -1985,7 +2003,7 @@ void TwitchDockWidget::pollLatestFollowers(bool initializeSnapshot)
                     if (followerPollRequestSessionId_ == sessionId) {
                         followerPollRequestSessionId_ = 0;
                     }
-                    if (initializeSnapshot && followerPollTimer_) {
+                    if (followerPollTimer_) {
                         followerPollTimer_->start();
                     }
 
@@ -2015,6 +2033,47 @@ void TwitchDockWidget::pollLatestFollowers(bool initializeSnapshot)
     };
 
     (*fetchPage)({}, {}, {}, {});
+}
+
+void TwitchDockWidget::resolveUserIdForLogin(const QString &token,
+                                             const QString &clientId,
+                                             const QString &login,
+                                             std::function<void(const QString &)> continuation)
+{
+    const QString trimmedLogin = sanitizeChannelLogin(login);
+    if (trimmedLogin.isEmpty()) {
+        continuation({});
+        return;
+    }
+
+    QUrl url(QStringLiteral("https://api.twitch.tv/helix/users"));
+    QUrlQuery query;
+    query.addQueryItem(QStringLiteral("login"), trimmedLogin);
+    url.setQuery(query);
+
+    QNetworkRequest request(url);
+    request.setRawHeader("Authorization", QByteArray("Bearer ") + token.toUtf8());
+    request.setRawHeader("Client-Id", clientId.toUtf8());
+
+    QNetworkReply *reply = networkManager_->get(request);
+    connect(reply, &QNetworkReply::finished, this, [reply, continuation = std::move(continuation)]() mutable {
+        const QByteArray payloadBytes = reply->readAll();
+        const QNetworkReply::NetworkError error = reply->error();
+        reply->deleteLater();
+
+        if (error != QNetworkReply::NoError) {
+            continuation({});
+            return;
+        }
+
+        const QJsonArray data = QJsonDocument::fromJson(payloadBytes).object().value(QStringLiteral("data")).toArray();
+        if (data.isEmpty()) {
+            continuation({});
+            return;
+        }
+
+        continuation(data.first().toObject().value(QStringLiteral("id")).toString().trimmed());
+    });
 }
 
 void TwitchDockWidget::fetchCategorySuggestions(const QString &query)

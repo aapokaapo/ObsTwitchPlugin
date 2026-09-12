@@ -121,10 +121,14 @@ private:
     void persistClientSecret(const QString &clientSecret);
     QString loadCachedClientSecret() const;
     void fetchCurrentChannelInfo();
-    void startFollowerActivityPolling(const QString &token, const QString &clientId);
+    void startFollowerActivityPolling(const QString &token, const QString &clientId, const QString &broadcasterId);
     void stopFollowerActivityPolling();
     void pollLatestFollowers(bool initializeSnapshot);
     void fetchCategorySuggestions(const QString &query);
+    void resolveUserIdForLogin(const QString &token,
+                               const QString &clientId,
+                               const QString &login,
+                               std::function<void(const QString &)> continuation);
     void resolveCategoryId(const QString &token,
                            const QString &clientId,
                            const QString &categoryName,
@@ -176,6 +180,7 @@ private:
     QSet<QString> validatedScopes_;
     QString followerPollToken_;
     QString followerPollClientId_;
+    QString followerPollBroadcasterId_;
     QHash<QString, QImage> emoteImages_;
     QMap<QString, QString> customCommands_;
     QSet<QString> pendingEmoteIds_;
