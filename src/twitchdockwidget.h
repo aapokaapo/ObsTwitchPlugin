@@ -12,6 +12,7 @@
 #include <QNetworkReply>
 #include <QPushButton>
 #include <QCompleter>
+#include <QDateTime>
 #include <QSet>
 #include <QStringList>
 #include <QStringListModel>
@@ -182,9 +183,12 @@ private:
     QList<PendingChatMessage> pendingChatMessages_;
     QList<LocalChatEcho> pendingLocalChatEchoes_;
     QSet<QString> knownFollowerIds_;
+    QDateTime newestKnownFollowerAt_;
     quint64 followerPollSessionId_ = 0;
+    quint64 followerPollRequestSessionId_ = 0;
     bool chatCanSendMessages_ = false;
     bool chatAutoConnectAttempted_ = false;
     bool followerSnapshotInitialized_ = false;
-    bool followerPollRequestInFlight_ = false;
+    bool followerMissingScopeWarningShown_ = false;
+    bool followerMissingClientIdWarningShown_ = false;
 };
