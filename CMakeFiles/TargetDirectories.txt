@@ -1,9 +1,0 @@
-/home/aapo/Asiakirjat/ObsTwitchPlugin/CMakeFiles/obstwitchplugin.dir
-/home/aapo/Asiakirjat/ObsTwitchPlugin/CMakeFiles/edit_cache.dir
-/home/aapo/Asiakirjat/ObsTwitchPlugin/CMakeFiles/rebuild_cache.dir
-/home/aapo/Asiakirjat/ObsTwitchPlugin/CMakeFiles/list_install_components.dir
-/home/aapo/Asiakirjat/ObsTwitchPlugin/CMakeFiles/install.dir
-/home/aapo/Asiakirjat/ObsTwitchPlugin/CMakeFiles/install/local.dir
-/home/aapo/Asiakirjat/ObsTwitchPlugin/CMakeFiles/install/strip.dir
-/home/aapo/Asiakirjat/ObsTwitchPlugin/CMakeFiles/obstwitchplugin_autogen_timestamp_deps.dir
-/home/aapo/Asiakirjat/ObsTwitchPlugin/CMakeFiles/obstwitchplugin_autogen.dir

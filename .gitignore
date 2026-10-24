@@ -1,7 +1,21 @@
+# Build directories
 /build/
 /cmake-build-*/
-/.idea/
-/.vscode/
-*.swp
-*.swo
-.DS_Store
+
+# Qt-generated files
+*_autogen/
+moc_*.cpp
+ui_*.h
+qrc_*.cpp
+
+# CMake-generated files
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+Makefile
+compile_commands.json
+
+# Compiled binaries
+*.o
+*.so
+*.a
