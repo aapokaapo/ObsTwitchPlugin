@@ -1,0 +1,2 @@
+set(__QT_DEPLOY_TARGET_obstwitchplugin_FILE /home/aapo/Asiakirjat/ObsTwitchPlugin/obstwitchplugin.so)
+set(__QT_DEPLOY_TARGET_obstwitchplugin_TYPE MODULE_LIBRARY)

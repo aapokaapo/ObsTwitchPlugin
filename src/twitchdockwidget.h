@@ -4,6 +4,8 @@
 
 #include <QHash>
 #include <QImage>
+#include <QLabel>
+#include <QJsonObject>
 #include <QLineEdit>
 #include <QList>
 #include <QListWidget>
@@ -22,6 +24,7 @@
 #include <QTabWidget>
 #include <QTextEdit>
 #include <QTimer>
+#include <QUrl>
 #include <QWidget>
 
 class TwitchDockWidget final : public QWidget {
@@ -100,7 +103,19 @@ private:
     void appendLocalOutgoingChatMessage(const QString &message, int commandDepth);
     bool sendChatMessage(const QString &message, int commandDepth = 0);
     void appendFormattedChatLine(const QByteArray &ircLine);
-    QString commandResponseForMessage(const QString &message) const;
+    QString commandResponseForMessage(const QString &message, const QString &username);
+    QString expandCommandVariables(const QString &response, const QString &username, const QString &arguments);
+    void persistCounters() const;
+    void refreshCountersTable();
+    void refreshScoreboard();
+    static bool isScoreboardCounter(const QString &name);
+    void addCounter();
+    void editCounterValue(const QString &name);
+    void changeCounterValue(const QString &name, int delta);
+    void resetCounter(const QString &name);
+    void deleteCounter(const QString &name);
+    bool executeModerationCommand(const QString &message);
+    void sendModerationRequest(const QByteArray &method, const QUrl &url, const QJsonObject &body, const QString &action);
     QList<ChatEmoteOccurrence> parseIrcEmotes(const QString &emotesTag) const;
     void enqueueChatMessage(const QString &timestamp,
                             const QString &username,
@@ -143,6 +158,9 @@ private:
 
     void persistOAuthToken(const QString &token);
     QString loadCachedOAuthToken() const;
+    void storeOAuthCredentials(const QJsonObject &payload);
+    void refreshOAuthToken(std::function<void(bool)> continuation = {});
+    void checkOAuthExpiry();
 
     void resolveIdentity(const QString &token, std::function<void(bool, const QSet<QString> &)> continuation);
     QByteArray buildIrcPass(const QString &oauthToken) const;
@@ -166,12 +184,16 @@ private:
     QListWidget *friendLinks_ = nullptr;
     QLineEdit *friendLinkInput_ = nullptr;
     QTableWidget *commandsTable_ = nullptr;
+    QTableWidget *countersTable_ = nullptr;
+    QLabel *homeScoreLabel_ = nullptr;
+    QLabel *awayScoreLabel_ = nullptr;
 
     QTcpServer *oauthServer_ = nullptr;
     QTcpSocket *chatSocket_ = nullptr;
     QNetworkAccessManager *networkManager_ = nullptr;
     QTimer *categorySuggestTimer_ = nullptr;
     QTimer *followerPollTimer_ = nullptr;
+    QTimer *oauthRefreshTimer_ = nullptr;
     QNetworkReply *categorySuggestReply_ = nullptr;
 
     QString broadcasterId_;
@@ -184,6 +206,8 @@ private:
     QString followerPollModeratorId_;
     QHash<QString, QImage> emoteImages_;
     QMap<QString, QString> customCommands_;
+    QMap<QString, quint64> counters_;
+    QSet<QString> deletedCounters_;
     QSet<QString> pendingEmoteIds_;
     QSet<QString> unavailableEmoteIds_;
     QList<PendingChatMessage> pendingChatMessages_;
@@ -199,4 +223,7 @@ private:
     bool followerMissingClientIdWarningShown_ = false;
     bool followerPollErrorShown_ = false;
     bool followerPollRequestInFlight_ = false;
+    bool oauthRefreshInFlight_ = false;
+    QDateTime oauthRefreshRetryAfter_;
+    QList<std::function<void(bool)>> oauthRefreshWaiters_;
 };

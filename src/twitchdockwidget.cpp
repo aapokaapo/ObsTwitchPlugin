@@ -1,9 +1,12 @@
 #include "twitchdockwidget.h"
 
 #include <QDesktopServices>
+#include <QApplication>
+#include <QClipboard>
 #include <QDir>
 #include <QFile>
 #include <QGridLayout>
+#include <QGroupBox>
 #include <QHostAddress>
 #include <QHBoxLayout>
 #include <QJsonArray>
@@ -19,9 +22,11 @@
 #include <QDialogButtonBox>
 #include <QFormLayout>
 #include <QHeaderView>
+#include <QInputDialog>
 #include <QMessageBox>
 #include <QPushButton>
 #include <QPointer>
+#include <QRandomGenerator>
 #include <QRegularExpression>
 #include <QSettings>
 #include <QStandardPaths>
@@ -39,7 +44,9 @@
 
 #include <algorithm>
 #include <memory>
+#include <limits>
 #include <optional>
+#include <utility>
 
 extern "C" {
 #if __has_include(<obs/obs-frontend-api.h>)
@@ -54,10 +61,13 @@ namespace {
 constexpr auto kTokenSettingsGroup = "ObsTwitchPlugin";
 constexpr auto kCommandsSettingsGroup = "Commands";
 constexpr auto kTokenSettingsKey = "twitch_oauth_token";
+constexpr auto kRefreshTokenSettingsKey = "twitch_refresh_token";
+constexpr auto kTokenExpirySettingsKey = "twitch_token_expiry_utc";
 constexpr auto kChatChannelSettingsKey = "chat_channel";
 constexpr auto kClientIdSettingsKey = "twitch_client_id";
 constexpr auto kClientSecretSettingsKey = "twitch_client_secret";
 constexpr auto kCommandsArraySettingsKey = "custom_commands";
+constexpr auto kCountersSettingsGroup = "Counters";
 constexpr auto kCommandTriggerSettingsKey = "trigger";
 constexpr auto kCommandResponseSettingsKey = "response";
 constexpr quint16 kOAuthRedirectPort = 38471;
@@ -88,6 +98,9 @@ const QStringList &requiredOAuthScopes()
         QStringLiteral("chat:read"),
         QStringLiteral("chat:edit"),
         QStringLiteral("moderator:read:followers"),
+        QStringLiteral("moderator:manage:banned_users"),
+        QStringLiteral("moderator:manage:chat_messages"),
+        QStringLiteral("moderator:manage:chat_settings"),
     };
     return scopes;
 }
@@ -201,13 +214,13 @@ public:
         auto *formLayout = new QFormLayout();
 
         triggerEdit_ = new QLineEdit(this);
-        triggerEdit_->setPlaceholderText(tr("command"));
+        triggerEdit_->setPlaceholderText(tr("wins, !wins, or win*"));
         triggerEdit_->setText(initialTrigger);
 
         responseEdit_ = new QTextEdit(this);
         responseEdit_->setAcceptRichText(false);
         responseEdit_->setPlaceholderText(
-            tr("Command response text (max %1 characters)").arg(kMaxTwitchChatMessageLength));
+            tr("Response, e.g. Hello {{ username }}! Visit #{{ counter1 }}"));
         responseEdit_->setPlainText(initialResponse);
 
         formLayout->addRow(tr("Trigger"), triggerEdit_);
@@ -215,11 +228,18 @@ public:
         layout->addLayout(formLayout);
         layout->addWidget(
             new QLabel(tr("Twitch chat responses are limited to %1 characters.").arg(kMaxTwitchChatMessageLength), this));
+        auto *wildcardHelp = new QLabel(tr("* matches zero or more non-space characters. Example: win* matches win, windows, winning."), this);
+        wildcardHelp->setWordWrap(true);
+        layout->addWidget(wildcardHelp);
 
         auto *buttons = new QDialogButtonBox(QDialogButtonBox::Save | QDialogButtonBox::Cancel, this);
         connect(buttons, &QDialogButtonBox::accepted, this, [this]() {
             if (trigger().isEmpty()) {
                 QMessageBox::warning(this, tr("Invalid Command"), tr("Command trigger cannot be empty."));
+                return;
+            }
+            if (QString(trigger()).remove(QLatin1Char('*')).trimmed().isEmpty()) {
+                QMessageBox::warning(this, tr("Invalid Command"), tr("A trigger cannot consist only of wildcards."));
                 return;
             }
             if (response().isEmpty()) {
@@ -281,9 +301,15 @@ TwitchDockWidget::TwitchDockWidget(QWidget *parent)
     followerPollTimer_->setInterval(kFollowerPollIntervalMs);
     connect(followerPollTimer_, &QTimer::timeout, this, [this]() { pollLatestFollowers(false); });
 
+    oauthRefreshTimer_ = new QTimer(this);
+    oauthRefreshTimer_->setInterval(30000);
+    connect(oauthRefreshTimer_, &QTimer::timeout, this, &TwitchDockWidget::checkOAuthExpiry);
+    oauthRefreshTimer_->start();
+
     loadPersistedUiState();
     loadPersistedCommands();
     QTimer::singleShot(0, this, &TwitchDockWidget::refreshObsServiceData);
+    QTimer::singleShot(0, this, &TwitchDockWidget::checkOAuthExpiry);
 }
 
 TwitchDockWidget::~TwitchDockWidget()
@@ -336,6 +362,12 @@ void TwitchDockWidget::buildUi()
     connect(messageEdit_, &QLineEdit::returnPressed, this, &TwitchDockWidget::sendManualMessage);
 
     chatLayout->addLayout(chatRow);
+    auto *moderationHelp = new QLabel(
+        tr("Moderation: /ban user [reason] · /timeout user [seconds] [reason] · /unban user · /clear · "
+           "/delete message-id · /slow [seconds] · /slowoff · /followers [minutes] · /followersoff · "
+           "/subscribers[off] · /emoteonly[off] · /uniquechat[off]"), chatTab);
+    moderationHelp->setWordWrap(true);
+    chatLayout->addWidget(moderationHelp);
     chatLayout->addWidget(chatText_);
     chatLayout->addLayout(messageRow);
     tabs_->addTab(chatTab, tr("Chat"));
@@ -471,9 +503,84 @@ void TwitchDockWidget::buildUi()
 
     connect(addCommandButton, &QPushButton::clicked, this, &TwitchDockWidget::addCommand);
 
+    auto *variableHelp = new QLabel(
+        tr("Triggers can appear anywhere in a message and do not need a ! prefix. "
+           "A configured prefix is required; * matches zero or more non-space characters (win* matches windows). "
+           "Variables: {{ username }}, {{ time_now }}, "
+           "{{ date_now }}, {{ channel }}, {{ args }}, {{ random_number }} (1–100), "
+           "and named counters such as {{ wins }}. Counter values are changed only using the controls below."), commandsTab);
+    variableHelp->setWordWrap(true);
+    commandsLayout->addWidget(variableHelp);
+
     commandsLayout->addLayout(commandButtonRow);
     commandsLayout->addWidget(commandsTable_);
+    auto *counterHeader = new QHBoxLayout();
+    auto *counterLabel = new QLabel(tr("Counters"), commandsTab);
+    auto *addCounterButton = new QPushButton(tr("Add Counter"), commandsTab);
+    counterHeader->addWidget(counterLabel);
+    counterHeader->addStretch();
+    counterHeader->addWidget(addCounterButton);
+    connect(addCounterButton, &QPushButton::clicked, this, &TwitchDockWidget::addCounter);
+    commandsLayout->addLayout(counterHeader);
+
+    countersTable_ = new QTableWidget(commandsTab);
+    countersTable_->setColumnCount(4);
+    countersTable_->setHorizontalHeaderLabels({tr("Name"), tr("Value"), tr("Variable"), tr("Actions")});
+    countersTable_->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    countersTable_->setSelectionMode(QAbstractItemView::NoSelection);
+    countersTable_->verticalHeader()->setVisible(false);
+    countersTable_->horizontalHeader()->setSectionResizeMode(0, QHeaderView::ResizeToContents);
+    countersTable_->horizontalHeader()->setSectionResizeMode(1, QHeaderView::ResizeToContents);
+    countersTable_->horizontalHeader()->setSectionResizeMode(2, QHeaderView::ResizeToContents);
+    countersTable_->horizontalHeader()->setSectionResizeMode(3, QHeaderView::Stretch);
+    commandsLayout->addWidget(countersTable_);
     tabs_->addTab(commandsTab, tr("Commands"));
+
+    auto *scoreboardTab = new QWidget(this);
+    auto *scoreboardLayout = new QVBoxLayout(scoreboardTab);
+    auto *scoreboardHeading = new QLabel(tr("Scoreboard"), scoreboardTab);
+    scoreboardHeading->setAlignment(Qt::AlignCenter);
+    scoreboardHeading->setStyleSheet(QStringLiteral("font-size: 20px; font-weight: bold;"));
+    scoreboardLayout->addWidget(scoreboardHeading);
+    auto *scoresRow = new QHBoxLayout();
+    const auto createScore = [this, scoreboardTab, scoresRow](const QString &name, const QString &title, QLabel *&valueLabel) {
+        auto *panel = new QGroupBox(title, scoreboardTab);
+        auto *panelLayout = new QVBoxLayout(panel);
+        valueLabel = new QLabel(QStringLiteral("0"), panel);
+        valueLabel->setAlignment(Qt::AlignCenter);
+        valueLabel->setStyleSheet(QStringLiteral("font-size: 42px; font-weight: bold;"));
+        auto *variableLabel = new QLabel(QStringLiteral("{{ %1 }}").arg(name), panel);
+        variableLabel->setAlignment(Qt::AlignCenter);
+        panelLayout->addWidget(valueLabel);
+        panelLayout->addWidget(variableLabel);
+        auto *buttons = new QHBoxLayout();
+        auto *minus = new QPushButton(QStringLiteral("−"), panel);
+        auto *plus = new QPushButton(QStringLiteral("+"), panel);
+        auto *edit = new QPushButton(tr("Edit"), panel);
+        buttons->addWidget(minus);
+        buttons->addWidget(plus);
+        buttons->addWidget(edit);
+        connect(minus, &QPushButton::clicked, this, [this, name]() { changeCounterValue(name, -1); });
+        connect(plus, &QPushButton::clicked, this, [this, name]() { changeCounterValue(name, 1); });
+        connect(edit, &QPushButton::clicked, this, [this, name]() { editCounterValue(name); });
+        panelLayout->addLayout(buttons);
+        scoresRow->addWidget(panel);
+    };
+    createScore(QStringLiteral("wins_home"), tr("Home"), homeScoreLabel_);
+    createScore(QStringLiteral("wins_away"), tr("Away"), awayScoreLabel_);
+    scoreboardLayout->addLayout(scoresRow);
+    auto *resetScoresButton = new QPushButton(tr("Reset Both Scores"), scoreboardTab);
+    connect(resetScoresButton, &QPushButton::clicked, this, [this]() {
+        if (QMessageBox::question(this, tr("Reset Scoreboard"), tr("Reset both scores to zero?")) != QMessageBox::Yes)
+            return;
+        counters_[QStringLiteral("wins_home")] = 0;
+        counters_[QStringLiteral("wins_away")] = 0;
+        persistCounters();
+        refreshCountersTable();
+    });
+    scoreboardLayout->addWidget(resetScoresButton);
+    scoreboardLayout->addStretch();
+    tabs_->addTab(scoreboardTab, tr("Scoreboard"));
     layout->addWidget(tabs_);
 }
 
@@ -491,7 +598,14 @@ void TwitchDockWidget::refreshObsServiceData()
         }
     }
 
-    if (!credentials.oauthToken.isEmpty()) {
+    // OBS's static OAuth setting may contain an older token. Prefer our own
+    // rotating credential whenever a refresh token is already stored.
+    QSettings oauthSettings(QStandardPaths::writableLocation(QStandardPaths::AppConfigLocation) +
+                                QStringLiteral("/obstwitchplugin.ini"), QSettings::IniFormat);
+    oauthSettings.beginGroup(kTokenSettingsGroup);
+    const bool hasRefreshToken = !oauthSettings.value(kRefreshTokenSettingsKey).toString().isEmpty();
+    oauthSettings.endGroup();
+    if (!credentials.oauthToken.isEmpty() && !hasRefreshToken) {
         tokenEdit_->setText(credentials.oauthToken);
         persistOAuthToken(credentials.oauthToken);
     } else {
@@ -742,12 +856,7 @@ void TwitchDockWidget::exchangeOAuthCodeForToken(const QString &authorizationCod
             return;
         }
 
-        broadcasterId_.clear();
-        twitchLogin_.clear();
-        validatedToken_.clear();
-        validatedScopes_.clear();
-        tokenEdit_->setText(token);
-        persistOAuthToken(token);
+        storeOAuthCredentials(payload);
         appendChatSystemMessage(tr("OAuth token exchange succeeded and token was cached."));
         if (authFieldsContainer_) {
             authFieldsContainer_->hide();
@@ -770,6 +879,110 @@ void TwitchDockWidget::persistOAuthToken(const QString &token)
 
     // Restrict token cache file permissions to current user only.
     QFile::setPermissions(settingsPath, QFile::ReadOwner | QFile::WriteOwner);
+}
+
+void TwitchDockWidget::storeOAuthCredentials(const QJsonObject &payload)
+{
+    const QString accessToken = payload.value(QStringLiteral("access_token")).toString().trimmed();
+    if (accessToken.isEmpty()) {
+        return;
+    }
+    const QString configDir = QStandardPaths::writableLocation(QStandardPaths::AppConfigLocation);
+    QDir().mkpath(configDir);
+    const QString settingsPath = configDir + QStringLiteral("/obstwitchplugin.ini");
+    QSettings settings(settingsPath, QSettings::IniFormat);
+    settings.beginGroup(kTokenSettingsGroup);
+    settings.setValue(kTokenSettingsKey, accessToken);
+    const QString refreshToken = payload.value(QStringLiteral("refresh_token")).toString().trimmed();
+    if (!refreshToken.isEmpty()) {
+        settings.setValue(kRefreshTokenSettingsKey, refreshToken);
+    }
+    const qint64 seconds = payload.value(QStringLiteral("expires_in")).toVariant().toLongLong();
+    if (seconds > 0) {
+        settings.setValue(kTokenExpirySettingsKey, QDateTime::currentDateTimeUtc().addSecs(seconds).toString(Qt::ISODate));
+    }
+    settings.endGroup();
+    settings.sync();
+    QFile::setPermissions(settingsPath, QFile::ReadOwner | QFile::WriteOwner);
+
+    const bool wasChatConnected = chatSocket_->state() != QAbstractSocket::UnconnectedState;
+    broadcasterId_.clear();
+    twitchLogin_.clear();
+    validatedToken_.clear();
+    validatedScopes_.clear();
+    tokenEdit_->setText(accessToken);
+    followerPollToken_ = accessToken;
+    if (wasChatConnected) {
+        chatSocket_->abort();
+        QTimer::singleShot(0, this, &TwitchDockWidget::connectChat);
+    }
+}
+
+void TwitchDockWidget::refreshOAuthToken(std::function<void(bool)> continuation)
+{
+    if (continuation) {
+        oauthRefreshWaiters_.append(std::move(continuation));
+    }
+    if (oauthRefreshInFlight_) {
+        return;
+    }
+
+    const QString settingsPath = QStandardPaths::writableLocation(QStandardPaths::AppConfigLocation) +
+                                 QStringLiteral("/obstwitchplugin.ini");
+    QSettings settings(settingsPath, QSettings::IniFormat);
+    settings.beginGroup(kTokenSettingsGroup);
+    const QString refreshToken = settings.value(kRefreshTokenSettingsKey).toString().trimmed();
+    settings.endGroup();
+    const QString clientId = clientIdEdit_->text().trimmed();
+    const QString clientSecret = clientSecretEdit_->text().trimmed();
+    if (refreshToken.isEmpty() || clientId.isEmpty() || clientSecret.isEmpty()) {
+        const auto waiters = std::exchange(oauthRefreshWaiters_, {});
+        for (const auto &callback : waiters) callback(false);
+        return;
+    }
+
+    oauthRefreshInFlight_ = true;
+    QUrlQuery body;
+    body.addQueryItem(QStringLiteral("grant_type"), QStringLiteral("refresh_token"));
+    body.addQueryItem(QStringLiteral("refresh_token"), refreshToken);
+    body.addQueryItem(QStringLiteral("client_id"), clientId);
+    body.addQueryItem(QStringLiteral("client_secret"), clientSecret);
+    QNetworkRequest request(QUrl(QStringLiteral("https://id.twitch.tv/oauth2/token")));
+    request.setHeader(QNetworkRequest::ContentTypeHeader, QStringLiteral("application/x-www-form-urlencoded"));
+    QNetworkReply *reply = networkManager_->post(request, body.query(QUrl::FullyEncoded).toUtf8());
+    connect(reply, &QNetworkReply::finished, this, [this, reply]() {
+        const QByteArray bytes = reply->readAll();
+        const bool networkOk = reply->error() == QNetworkReply::NoError;
+        reply->deleteLater();
+        const QJsonObject payload = QJsonDocument::fromJson(bytes).object();
+        const bool success = networkOk && !payload.value(QStringLiteral("access_token")).toString().isEmpty();
+        if (success) {
+            storeOAuthCredentials(payload);
+            appendChatSystemMessage(tr("Twitch OAuth token refreshed automatically."));
+        } else {
+            oauthRefreshRetryAfter_ = QDateTime::currentDateTimeUtc().addSecs(120);
+            appendChatSystemMessage(tr("Twitch token refresh failed. Check your connection or authorize again."));
+        }
+        oauthRefreshInFlight_ = false;
+        const auto waiters = std::exchange(oauthRefreshWaiters_, {});
+        for (const auto &callback : waiters) callback(success);
+    });
+}
+
+void TwitchDockWidget::checkOAuthExpiry()
+{
+    const QString settingsPath = QStandardPaths::writableLocation(QStandardPaths::AppConfigLocation) +
+                                 QStringLiteral("/obstwitchplugin.ini");
+    QSettings settings(settingsPath, QSettings::IniFormat);
+    settings.beginGroup(kTokenSettingsGroup);
+    const QString refreshToken = settings.value(kRefreshTokenSettingsKey).toString().trimmed();
+    const QDateTime expiry = QDateTime::fromString(settings.value(kTokenExpirySettingsKey).toString(), Qt::ISODate);
+    settings.endGroup();
+    if (!refreshToken.isEmpty() &&
+        (!oauthRefreshRetryAfter_.isValid() || QDateTime::currentDateTimeUtc() >= oauthRefreshRetryAfter_) &&
+        (!expiry.isValid() || QDateTime::currentDateTimeUtc().secsTo(expiry) <= 120)) {
+        refreshOAuthToken();
+    }
 }
 
 QString TwitchDockWidget::loadCachedOAuthToken() const
@@ -1091,6 +1304,8 @@ void TwitchDockWidget::persistCommands() const
 void TwitchDockWidget::loadPersistedCommands()
 {
     customCommands_.clear();
+    counters_.clear();
+    deletedCounters_.clear();
     if (commandsTable_) {
         commandsTable_->setRowCount(0);
     }
@@ -1111,7 +1326,27 @@ void TwitchDockWidget::loadPersistedCommands()
     }
     settings.endArray();
     settings.endGroup();
+    settings.beginGroup(kCountersSettingsGroup);
+    for (const QString &deletedName : settings.value(QStringLiteral("deleted_names")).toStringList()) {
+        deletedCounters_.insert(deletedName);
+    }
+    for (const QString &key : settings.childKeys()) {
+        if (QRegularExpression(QStringLiteral("^[a-z][a-z0-9_]*$")).match(key).hasMatch() &&
+            key != QStringLiteral("deleted_names")) {
+            counters_.insert(key, settings.value(key).toULongLong());
+        }
+    }
     settings.endGroup();
+    settings.endGroup();
+
+    // These two built-in counters always exist, including after old settings
+    // or an attempted deletion in a previous version.
+    deletedCounters_.remove(QStringLiteral("wins_home"));
+    deletedCounters_.remove(QStringLiteral("wins_away"));
+    if (!counters_.contains(QStringLiteral("wins_home"))) counters_.insert(QStringLiteral("wins_home"), 0);
+    if (!counters_.contains(QStringLiteral("wins_away"))) counters_.insert(QStringLiteral("wins_away"), 0);
+
+    refreshCountersTable();
 
     if (!commandsTable_) {
         return;
@@ -1332,6 +1567,10 @@ void TwitchDockWidget::sendManualMessage()
     }
 
     const QString message = messageEdit_->text();
+    if (executeModerationCommand(message)) {
+        messageEdit_->clear();
+        return;
+    }
     if (sendChatMessage(message)) {
         messageEdit_->clear();
     }
@@ -1386,7 +1625,7 @@ void TwitchDockWidget::appendFormattedChatLine(const QByteArray &ircLine)
         const QString senderLogin = messageMatch.captured(2);
         const QString message = messageMatch.captured(3);
         const QString displayName = ircTagValue(tags, QStringLiteral("display-name"));
-        const QString username = displayName.isEmpty() ? QStringLiteral("user") : displayName;
+        const QString username = displayName.isEmpty() ? senderLogin : displayName;
         const QString color = sanitizeChatColor(ircTagValue(tags, QStringLiteral("color")));
         const bool isOwnMessage = !twitchLogin_.isEmpty() && senderLogin.compare(twitchLogin_, Qt::CaseInsensitive) == 0;
         std::optional<int> localEchoCommandDepth;
@@ -1400,7 +1639,7 @@ void TwitchDockWidget::appendFormattedChatLine(const QByteArray &ircLine)
                 pendingLocalChatEchoes_.erase(echoedMessageIt);
             }
         }
-        const QString commandResponse = commandResponseForMessage(message);
+        const QString commandResponse = commandResponseForMessage(message, username);
         if (localEchoCommandDepth.has_value()) {
             if (commandResponse.isEmpty()) {
                 return;
@@ -1510,14 +1749,208 @@ void TwitchDockWidget::appendFormattedChatLine(const QByteArray &ircLine)
     }
 }
 
-QString TwitchDockWidget::commandResponseForMessage(const QString &message) const
+QString TwitchDockWidget::commandResponseForMessage(const QString &message, const QString &username)
 {
-    const QString trigger = message.trimmed();
-    if (trigger.isEmpty()) {
+    const QString input = message.trimmed();
+    if (input.isEmpty()) {
         return {};
     }
 
-    return customCommands_.value(trigger);
+    // Match complete triggers anywhere in chat. For overlapping triggers,
+    // choose the earliest occurrence, then the longest match at that position.
+    // Boundaries prevent 'win' from matching 'window'. A leading '!' is a
+    // literal part of a trigger: bare 'wins' must not also match '!wins'.
+    QString selectedTrigger;
+    QRegularExpressionMatch selectedMatch;
+    int earliest = input.size();
+    for (auto it = customCommands_.cbegin(); it != customCommands_.cend(); ++it) {
+        const QString trigger = it.key().trimmed();
+        if (trigger.isEmpty() || QString(trigger).remove(QLatin1Char('*')).trimmed().isEmpty()) continue;
+        QString wildcardPattern = QRegularExpression::escape(trigger);
+        wildcardPattern.replace(QStringLiteral("\\*"), QStringLiteral("\\S*"));
+        const QRegularExpression pattern(
+            QStringLiteral("(?<![\\p{L}\\p{N}_!])%1(?![\\p{L}\\p{N}_])")
+                .arg(wildcardPattern),
+            QRegularExpression::CaseInsensitiveOption);
+        const QRegularExpressionMatch match = pattern.match(input);
+        if (!match.hasMatch()) continue;
+        if (match.capturedStart() < earliest ||
+            (match.capturedStart() == earliest && match.capturedLength() > selectedMatch.capturedLength())) {
+            earliest = match.capturedStart();
+            selectedTrigger = it.key();
+            selectedMatch = match;
+        }
+    }
+    if (selectedTrigger.isEmpty()) {
+        return {};
+    }
+    const QString arguments = input.mid(selectedMatch.capturedEnd()).trimmed();
+    return expandCommandVariables(customCommands_.value(selectedTrigger), username, arguments);
+}
+
+QString TwitchDockWidget::expandCommandVariables(const QString &response, const QString &username, const QString &arguments)
+{
+    static const QRegularExpression variablePattern(QStringLiteral("\\{\\{\\s*([a-zA-Z0-9_]+)\\s*\\}\\}"));
+    QString expanded;
+    int previous = 0;
+    auto matches = variablePattern.globalMatch(response);
+    while (matches.hasNext()) {
+        const QRegularExpressionMatch match = matches.next();
+        expanded += response.mid(previous, match.capturedStart() - previous);
+        const QString name = match.captured(1).toLower();
+        QString value;
+        if (name == QStringLiteral("username")) value = username;
+        else if (name == QStringLiteral("time_now")) value = QTime::currentTime().toString(QStringLiteral("HH:mm:ss"));
+        else if (name == QStringLiteral("date_now")) value = QDate::currentDate().toString(Qt::ISODate);
+        else if (name == QStringLiteral("channel")) value = sanitizeChannelLogin(channelEdit_->text());
+        else if (name == QStringLiteral("args")) value = arguments;
+        else if (name == QStringLiteral("random_number"))
+            value = QString::number(QRandomGenerator::global()->bounded(1, 101));
+        else if (!deletedCounters_.contains(name) && (counters_.contains(name) ||
+                 QRegularExpression(QStringLiteral("^counter[1-9]$")).match(name).hasMatch())) {
+            value = QString::number(counters_.value(name));
+        } else {
+            value = match.captured(); // Leave unknown placeholders intact.
+        }
+        expanded += value;
+        previous = match.capturedEnd();
+    }
+    expanded += response.mid(previous);
+    return expanded;
+}
+
+void TwitchDockWidget::persistCounters() const
+{
+    const QString configDir = QStandardPaths::writableLocation(QStandardPaths::AppConfigLocation);
+    QDir().mkpath(configDir);
+    QSettings settings(configDir + QStringLiteral("/obstwitchplugin.ini"), QSettings::IniFormat);
+    settings.beginGroup(kTokenSettingsGroup);
+    settings.beginGroup(kCountersSettingsGroup);
+    settings.remove(QString());
+    settings.setValue(QStringLiteral("deleted_names"), deletedCounters_.values());
+    for (auto it = counters_.cbegin(); it != counters_.cend(); ++it) settings.setValue(it.key(), it.value());
+    settings.endGroup();
+    settings.endGroup();
+    settings.sync();
+}
+
+void TwitchDockWidget::refreshCountersTable()
+{
+    if (!countersTable_) return;
+    countersTable_->setRowCount(0);
+    for (auto it = counters_.cbegin(); it != counters_.cend(); ++it) {
+        const QString name = it.key();
+        if (isScoreboardCounter(name)) continue;
+        const int row = countersTable_->rowCount();
+        countersTable_->insertRow(row);
+        countersTable_->setItem(row, 0, new QTableWidgetItem(name));
+        countersTable_->setItem(row, 1, new QTableWidgetItem(QString::number(it.value())));
+        const QString variable = QStringLiteral("{{ %1 }}").arg(name);
+        countersTable_->setItem(row, 2, new QTableWidgetItem(variable));
+        auto *actions = new QWidget(countersTable_);
+        auto *layout = new QHBoxLayout(actions);
+        layout->setContentsMargins(0, 0, 0, 0);
+        layout->setSpacing(3);
+        const auto addAction = [this, actions, layout](const QString &caption, std::function<void()> callback) {
+            auto *button = new QPushButton(caption, actions);
+            connect(button, &QPushButton::clicked, this, [callback = std::move(callback)]() { callback(); });
+            layout->addWidget(button);
+        };
+        addAction(QStringLiteral("−"), [this, name]() { changeCounterValue(name, -1); });
+        addAction(QStringLiteral("+"), [this, name]() { changeCounterValue(name, 1); });
+        addAction(tr("Edit"), [this, name]() { editCounterValue(name); });
+        addAction(tr("Reset"), [this, name]() { resetCounter(name); });
+        addAction(tr("Copy"), [variable]() { QApplication::clipboard()->setText(variable); });
+        addAction(tr("Delete"), [this, name]() { deleteCounter(name); });
+        countersTable_->setCellWidget(row, 3, actions);
+    }
+    countersTable_->resizeRowsToContents();
+    refreshScoreboard();
+}
+
+bool TwitchDockWidget::isScoreboardCounter(const QString &name)
+{
+    return name == QStringLiteral("wins_home") || name == QStringLiteral("wins_away");
+}
+
+void TwitchDockWidget::refreshScoreboard()
+{
+    if (homeScoreLabel_) homeScoreLabel_->setText(QString::number(counters_.value(QStringLiteral("wins_home"))));
+    if (awayScoreLabel_) awayScoreLabel_->setText(QString::number(counters_.value(QStringLiteral("wins_away"))));
+}
+
+void TwitchDockWidget::addCounter()
+{
+    bool accepted = false;
+    const QString name = QInputDialog::getText(this, tr("Add Counter"),
+        tr("Counter name (letters, digits, underscores):"), QLineEdit::Normal, {}, &accepted).trimmed().toLower();
+    if (!accepted) return;
+    static const QRegularExpression validName(QStringLiteral("^[a-z][a-z0-9_]*$"));
+    static const QSet<QString> reserved = {QStringLiteral("username"), QStringLiteral("time_now"),
+        QStringLiteral("date_now"), QStringLiteral("channel"), QStringLiteral("args"),
+        QStringLiteral("random_number")};
+    if (!validName.match(name).hasMatch() || reserved.contains(name) || counters_.contains(name) ||
+        isScoreboardCounter(name)) {
+        QMessageBox::warning(this, tr("Invalid Counter"),
+            tr("Use a unique name starting with a letter, containing only letters, numbers, or underscores. "
+               "Built-in variable names are reserved."));
+        return;
+    }
+    counters_.insert(name, 0);
+    deletedCounters_.remove(name);
+    persistCounters();
+    refreshCountersTable();
+}
+
+void TwitchDockWidget::editCounterValue(const QString &name)
+{
+    if (!counters_.contains(name)) return;
+    bool accepted = false;
+    const QString input = QInputDialog::getText(this, tr("Set Counter Value"),
+        tr("Value for %1 (non-negative integer):").arg(name), QLineEdit::Normal,
+        QString::number(counters_.value(name)), &accepted).trimmed();
+    if (!accepted) return;
+    bool valid = false;
+    const quint64 value = input.toULongLong(&valid);
+    if (!valid || input.startsWith(QLatin1Char('-'))) {
+        QMessageBox::warning(this, tr("Invalid Value"), tr("Enter a non-negative whole number."));
+        return;
+    }
+    counters_[name] = value;
+    persistCounters();
+    refreshCountersTable();
+}
+
+void TwitchDockWidget::changeCounterValue(const QString &name, int delta)
+{
+    if (!counters_.contains(name)) return;
+    quint64 &value = counters_[name];
+    if (delta < 0 && value > 0) --value;
+    if (delta > 0 && value < std::numeric_limits<quint64>::max()) ++value;
+    persistCounters();
+    refreshCountersTable();
+}
+
+void TwitchDockWidget::resetCounter(const QString &name)
+{
+    if (!counters_.contains(name)) return;
+    if (QMessageBox::question(this, tr("Reset Counter"),
+        tr("Reset %1 to zero?").arg(name)) != QMessageBox::Yes) return;
+    counters_[name] = 0;
+    persistCounters();
+    refreshCountersTable();
+}
+
+void TwitchDockWidget::deleteCounter(const QString &name)
+{
+    if (isScoreboardCounter(name)) return;
+    if (!counters_.contains(name)) return;
+    if (QMessageBox::question(this, tr("Delete Counter"),
+        tr("Delete %1? Custom commands referencing this variable will no longer resolve it.").arg(name)) != QMessageBox::Yes) return;
+    counters_.remove(name);
+    deletedCounters_.insert(name);
+    persistCounters();
+    refreshCountersTable();
 }
 
 QList<TwitchDockWidget::ChatEmoteOccurrence> TwitchDockWidget::parseIrcEmotes(const QString &emotesTag) const
@@ -1738,6 +2171,162 @@ bool TwitchDockWidget::sendChatMessage(const QString &message, int commandDepth)
     }
 
     appendLocalOutgoingChatMessage(outbound, commandDepth);
+    return true;
+}
+
+void TwitchDockWidget::sendModerationRequest(const QByteArray &method, const QUrl &url,
+                                              const QJsonObject &body, const QString &action)
+{
+    QNetworkRequest request(url);
+    request.setRawHeader("Authorization", QByteArray("Bearer ") + tokenEdit_->text().trimmed().toUtf8());
+    request.setRawHeader("Client-Id", clientIdEdit_->text().trimmed().toUtf8());
+    request.setHeader(QNetworkRequest::ContentTypeHeader, QStringLiteral("application/json"));
+    QNetworkReply *reply = networkManager_->sendCustomRequest(request, method, QJsonDocument(body).toJson(QJsonDocument::Compact));
+    connect(reply, &QNetworkReply::finished, this, [this, reply, action]() {
+        const QByteArray payload = reply->readAll();
+        const int status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+        const bool ok = reply->error() == QNetworkReply::NoError && status >= 200 && status < 300;
+        const QString error = QJsonDocument::fromJson(payload).object().value(QStringLiteral("message")).toString();
+        reply->deleteLater();
+        appendChatSystemMessage(ok ? tr("Moderation: %1 succeeded.").arg(action)
+                                   : tr("Moderation: %1 failed (HTTP %2): %3").arg(action).arg(status).arg(error));
+    });
+}
+
+bool TwitchDockWidget::executeModerationCommand(const QString &message)
+{
+    const QStringList words = message.simplified().split(QLatin1Char(' '), Qt::SkipEmptyParts);
+    if (words.isEmpty() || !words.first().startsWith(QLatin1Char('/')) ||
+        words.first().compare(QStringLiteral("/me"), Qt::CaseInsensitive) == 0) return false;
+
+    const QString command = words.first().mid(1).toLower();
+    const QSet<QString> bans = {QStringLiteral("ban"), QStringLiteral("timeout"), QStringLiteral("unban")};
+    const QSet<QString> modes = {QStringLiteral("slow"), QStringLiteral("slowoff"),
+        QStringLiteral("followers"), QStringLiteral("followersoff"), QStringLiteral("subscribers"),
+        QStringLiteral("subscribersoff"), QStringLiteral("emoteonly"), QStringLiteral("emoteonlyoff"),
+        QStringLiteral("uniquechat"), QStringLiteral("uniquechatoff")};
+    if (!bans.contains(command) && !modes.contains(command) && command != QStringLiteral("clear") &&
+        command != QStringLiteral("delete")) {
+        appendChatSystemMessage(tr("Unknown slash command. See moderation commands above the chat."));
+        return true;
+    }
+    if ((bans.contains(command) || command == QStringLiteral("delete")) && words.size() < 2) {
+        appendChatSystemMessage(tr("Missing user or message ID for /%1.").arg(command));
+        return true;
+    }
+
+    const QString token = tokenEdit_->text().trimmed();
+    const QString clientId = clientIdEdit_->text().trimmed();
+    if (token.isEmpty() || clientId.isEmpty()) {
+        appendChatSystemMessage(tr("Moderation requires Twitch OAuth authorization."));
+        return true;
+    }
+    resolveIdentity(token, [this, token, clientId, words, command, bans, modes](bool ok, const QSet<QString> &scopes) {
+        if (!ok) return;
+        const QString scope = bans.contains(command) ? QStringLiteral("moderator:manage:banned_users") :
+            modes.contains(command) ? QStringLiteral("moderator:manage:chat_settings") :
+                                      QStringLiteral("moderator:manage:chat_messages");
+        if (!scopes.contains(scope)) {
+            appendChatSystemMessage(tr("Moderation requires the %1 scope. Reauthorize in Stream Info.").arg(scope));
+            return;
+        }
+        const QString moderatorId = broadcasterId_;
+        const QString channel = sanitizeChannelLogin(channelEdit_->text());
+        resolveUserIdForLogin(token, clientId, channel,
+            [this, token, clientId, words, command, bans, moderatorId](const QString &channelId) {
+            if (channelId.isEmpty()) {
+                appendChatSystemMessage(tr("Cannot resolve channel ID for moderation."));
+                return;
+            }
+            const auto endpoint = [channelId, moderatorId](const QString &path) {
+                QUrl url(QStringLiteral("https://api.twitch.tv/helix/") + path);
+                QUrlQuery query;
+                query.addQueryItem(QStringLiteral("broadcaster_id"), channelId);
+                query.addQueryItem(QStringLiteral("moderator_id"), moderatorId);
+                url.setQuery(query);
+                return url;
+            };
+            if (bans.contains(command)) {
+                QString target = words.at(1);
+                if (target.startsWith(QLatin1Char('@'))) target.remove(0, 1);
+                resolveUserIdForLogin(token, clientId, target,
+                    [this, words, command, channelId, moderatorId](const QString &targetId) {
+                    if (targetId.isEmpty()) {
+                        appendChatSystemMessage(tr("Unable to find moderation target."));
+                        return;
+                    }
+                    QUrl url(QStringLiteral("https://api.twitch.tv/helix/moderation/bans"));
+                    QUrlQuery query;
+                    query.addQueryItem(QStringLiteral("broadcaster_id"), channelId);
+                    query.addQueryItem(QStringLiteral("moderator_id"), moderatorId);
+                    if (command == QStringLiteral("unban")) {
+                        query.addQueryItem(QStringLiteral("user_id"), targetId);
+                        url.setQuery(query);
+                        sendModerationRequest("DELETE", url, {}, command);
+                        return;
+                    }
+                    url.setQuery(query);
+                    QJsonObject data{{QStringLiteral("user_id"), targetId}};
+                    int reasonStart = 2;
+                    if (command == QStringLiteral("timeout")) {
+                        int seconds = 600;
+                        if (words.size() > 2) {
+                            bool numeric = false;
+                            const int parsed = words.at(2).toInt(&numeric);
+                            if (numeric) { seconds = parsed; reasonStart = 3; }
+                        }
+                        if (seconds < 1 || seconds > 1209600) {
+                            appendChatSystemMessage(tr("Timeout must be between 1 and 1209600 seconds."));
+                            return;
+                        }
+                        data.insert(QStringLiteral("duration"), seconds);
+                    }
+                    if (words.size() > reasonStart)
+                        data.insert(QStringLiteral("reason"), words.mid(reasonStart).join(QLatin1Char(' ')).left(500));
+                    sendModerationRequest("POST", url, {{QStringLiteral("data"), data}}, command);
+                });
+                return;
+            }
+            if (command == QStringLiteral("clear") || command == QStringLiteral("delete")) {
+                QUrl url = endpoint(QStringLiteral("moderation/chat"));
+                if (command == QStringLiteral("delete")) {
+                    QUrlQuery query(url);
+                    query.addQueryItem(QStringLiteral("message_id"), words.at(1));
+                    url.setQuery(query);
+                }
+                sendModerationRequest("DELETE", url, {}, command);
+                return;
+            }
+            QJsonObject body;
+            if (command == QStringLiteral("slow") || command == QStringLiteral("followers")) {
+                int duration = command == QStringLiteral("slow") ? 30 : 0;
+                if (words.size() > 1) {
+                    bool numeric = false;
+                    duration = words.at(1).toInt(&numeric);
+                    if (!numeric) { appendChatSystemMessage(tr("Duration must be a number.")); return; }
+                }
+                const int maximum = command == QStringLiteral("slow") ? 120 : 129600;
+                const int minimum = command == QStringLiteral("slow") ? 3 : 0;
+                if (duration < minimum || duration > maximum) {
+                    appendChatSystemMessage(tr("Duration must be between %1 and %2.").arg(minimum).arg(maximum));
+                    return;
+                }
+                body.insert(command == QStringLiteral("slow") ? QStringLiteral("slow_mode") : QStringLiteral("follower_mode"), true);
+                body.insert(command == QStringLiteral("slow") ? QStringLiteral("slow_mode_wait_time") : QStringLiteral("follower_mode_duration"), duration);
+            } else {
+                QString setting = command;
+                const bool enabled = !setting.endsWith(QStringLiteral("off"));
+                if (!enabled) setting.chop(3);
+                if (setting == QStringLiteral("slow")) setting = QStringLiteral("slow_mode");
+                else if (setting == QStringLiteral("followers")) setting = QStringLiteral("follower_mode");
+                else if (setting == QStringLiteral("subscribers")) setting = QStringLiteral("subscriber_mode");
+                else if (setting == QStringLiteral("emoteonly")) setting = QStringLiteral("emote_mode");
+                else if (setting == QStringLiteral("uniquechat")) setting = QStringLiteral("unique_chat_mode");
+                body.insert(setting, enabled);
+            }
+            sendModerationRequest("PATCH", endpoint(QStringLiteral("chat/settings")), body, command);
+        });
+    });
     return true;
 }
 
